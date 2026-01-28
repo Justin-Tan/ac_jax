@@ -774,7 +774,7 @@ if __name__ == "__main__":
                     choices=MODEL_TYPES,
                     default='mlp',
                     help=f'Model architecture type. Choices: {", ".join(MODEL_TYPES)}')
-    parser.set_defaults(curriculum_train=True)
+    parser.set_defaults(curriculum_train=False)
     args = parser.parse_args()
 
     @dataclass
