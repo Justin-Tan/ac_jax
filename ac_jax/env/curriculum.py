@@ -551,6 +551,7 @@ class BatchedVmapCurriculumAutoResetWrapper(Wrapper):
         # parallel presentation selection for resets
         # Split keys for selection and reset
         key = stepped_state.key[0]
+        select_keys = jax.random.split(key, num_envs * 2)
         select_keys, reset_keys = select_keys[:num_envs], select_keys[num_envs:]
         
         reset_indices = vmap(

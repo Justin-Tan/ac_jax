@@ -48,7 +48,7 @@ python3 -m ac_jax.ppo_train -h
 # check all hyperparameters
 vim ac_jax/ppo_train.py
 
-# run training (for example)
+# run training
 python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2e-4 --num-envs 512 --curriculum-data-path data/ac_dataset_30k_64.npz
 ```
 
