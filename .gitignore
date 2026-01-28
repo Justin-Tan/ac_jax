@@ -12,6 +12,7 @@ __pycache__/
 *.ipynb
 **/*.ipynb
 # exceptions
+!data/
 !data/initial_presentations.npy
 
 # Custom
@@ -36,7 +37,7 @@ __pycache__/
 **/*.zip
 figures/
 results/
-data/
+data/*
 experiments/
 checkpoints/
 notebooks/

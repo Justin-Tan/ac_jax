@@ -1,6 +1,9 @@
-# ac_jax
+<h1 align='center'>ac-jax</h1>
 Reinforcement learning for the Andrews-Curtis conjecture. Essentially we would like to train an autonomous agent to find sequences of group operations which can trivialise a balanced presentation of the trivial group,
-$$ \langle x_1, \ldots, x_n \, \vert \, r_1, \ldots, r_n \rangle \overset{\textsf{RL}}{\longrightarrow} \langle x_1, \ldots, x_n \, \vert \, x_1, \ldots, x_n \rangle $$
+
+$$
+\langle x_1, \ldots, x_n \, \vert \, r_1, \ldots, r_n \rangle \overset{\textsf{RL}}{\longrightarrow} \langle x_1, \ldots, x_n \, \vert \, x_1, \ldots, x_n \rangle
+$$
 
 ## Installation
 
