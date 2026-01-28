@@ -1,3 +1,52 @@
+ac_solver/agents/checkpoints/
+checkpoints/
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# Notebooks
+*.ipynb
+**/*.ipynb
+# exceptions
+!data/initial_presentations.npy
+
+# Custom
+*.log
+*.h5
+*.hdf
+*.pt
+*.npy
+*.npz
+*.pkl
+*.pdf
+*.pickle
+*.zip
+**/*.pickle
+**/*.parquet
+**/*.h5
+**/*.hdf
+**/*.pdf
+**/*.pt
+**/*.npy
+**/*.npz
+**/*.zip
+figures/
+results/
+data/
+experiments/
+checkpoints/
+notebooks/
+test/
+*.slurm
+*.tex
+*.sh
+**/*.sh
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -205,3 +254,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
