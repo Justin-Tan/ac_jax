@@ -188,9 +188,24 @@ celerybeat.pid
 .envrc
 .venv
 venv/
+.ac_env
+ac_env/
+/ac_env
 env.bak/
 venv.bak/
+**/venv/
+**/.venv/
+**/virtualenv/
 
+# Common venv naming patterns
+**/*venv/
+**/ac_env/
+
+# Additional Python virtual environment indicators
+**/pyvenv.cfg
+**/lib/python*/
+**/Scripts/activate
+**/bin/activate
 # Spyder project settings
 .spyderproject
 .spyproject

@@ -61,17 +61,20 @@ class PPOTrainer:
         self.eval_env = _env
 
     def init_network_and_optimiser(self) -> None:
-        """
-        self.model = agents.ActorCriticIndependent(
-            n_actions= self.env.n_actions,
-            actor_layers=self.config.actor_layers,
-            critic_layers=self.config.critic_layers)
-
-        self.model = agents.ActorCritic(n_actions=self.env.n_actions, encoder_type="conv")
-        """
-        self.model = agents.ActorCriticTransformer(n_actions=self.env.n_actions, 
-                                                   max_rel_length=self.max_relator_length,
-                                                   n_value_bins=self.n_value_bins)
+        if self.config.model_type == 'mlp':
+            self.model = agents.ActorCriticIndependent(
+                n_actions= self.env.n_actions,
+                actor_layers=self.config.actor_layers,
+                critic_layers=self.config.critic_layers)
+        elif self.config.model_type == 'conv':
+            self.model = agents.ActorCritic(n_actions=self.env.n_actions, 
+                                            encoder_type="conv")
+        elif self.config.model_type == 'transformer':
+            self.model = agents.ActorCriticTransformer(n_actions=self.env.n_actions, 
+                                                       max_rel_length=self.max_relator_length,
+                                                       n_value_bins=self.n_value_bins)
+        else:
+            raise ValueError(f'Unknown model type: {self.config.model_type}')
         
         if self.config.anneal_lr is True:
             self.optimiser = optax.chain(
@@ -753,7 +756,7 @@ class PPOTrainerCurriculum(PPOTrainer):
 
 if __name__ == "__main__":
     import argparse
-    
+    MODEL_TYPES = ['transformer', 'mlp', 'conv']
     parser = argparse.ArgumentParser(description='RL agent training',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--initial-pool', type=str, 
@@ -767,6 +770,10 @@ if __name__ == "__main__":
                        help='Learning rate')
     parser.add_argument('--num-envs', type=int, default=1024,
                        help='Number of parallel environments')
+    parser.add_argument('--model-type', type=str,
+                    choices=MODEL_TYPES,
+                    default='mlp',
+                    help=f'Model architecture type. Choices: {", ".join(MODEL_TYPES)}')
     parser.set_defaults(curriculum_train=True)
     args = parser.parse_args()
 

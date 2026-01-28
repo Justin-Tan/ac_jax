@@ -37,8 +37,10 @@ python3 -m ac_jax.env.generate_curriculum_data -h
 # generate data (example args)
 python3 -m ac_jax.env.generate_curriculum_data --total-easy 10000 --total-med 10000 --total-hard 10000 --fname ac_dataset_30k_64
 ```
+Note the compilation time for data generation may be long, but runs fast once compiled. 
 
 2. Train PPO agent
+The default architecture are two independent fully connected networks parameterising the actor and critic. For a more performant model you may swap this out for a transformer--based model via the `model-type` argument as below:
 ```bash
 # check arguments
 python3 -m ac_jax.ppo_train -h
@@ -47,7 +49,7 @@ python3 -m ac_jax.ppo_train -h
 vim ac_jax/ppo_train.py
 
 # run training (for example)
-python3 -m ac_jax.ppo_train --learning-rate 1e-4 --num-envs 512 --initial-pool data/initial_presentations.npy --curriculum-data-path data/ac_dataset_30k_64.npz
+python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 1e-4 --num-envs 512 --initial-pool data/initial_presentations.npy --curriculum-data-path data/ac_dataset_30k_64.npz
 ```
 
 For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
