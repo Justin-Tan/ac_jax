@@ -50,4 +50,4 @@ vim ac_jax/ppo_train.py
 python3 -m ac_jax.ppo_train --learning-rate 1e-4 --num-envs 512 --initial-pool data/initial_presentations.npy --curriculum-data-path data/ac_dataset_30k_64.npz
 ```
 
-For more details regarding the agent and implementation, please see [this short report!](assets/ac_jax_report.pdf)
+For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
