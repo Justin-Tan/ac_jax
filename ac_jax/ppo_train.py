@@ -801,7 +801,7 @@ if __name__ == "__main__":
         actor_layers = (512, 512)
         critic_layers = (512, 512)
 
-        log_interval: int = 32  # log every n epochs
+        log_interval: int = 8  # log every n epochs
         save_interval: int = 256  # save logs every n epochs
         checkpoint_interval: int = 1024  # save checkpoint every n epochs
         checkpoint_dir: str = "checkpoints"
