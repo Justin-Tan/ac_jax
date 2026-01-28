@@ -810,6 +810,7 @@ if __name__ == "__main__":
         initial_pool = args.initial_pool
         curriculum_data_path = args.curriculum_data_path
         curriculum_train: bool = args.curriculum_train
+        model_type = args.model_type
 
     rng = jax.random.PRNGKey(42)
     if config.curriculum_train is True:

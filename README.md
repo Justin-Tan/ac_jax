@@ -49,7 +49,7 @@ python3 -m ac_jax.ppo_train -h
 vim ac_jax/ppo_train.py
 
 # run training (for example)
-python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 1e-4 --num-envs 512 --initial-pool data/initial_presentations.npy --curriculum-data-path data/ac_dataset_30k_64.npz
+python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2e-4 --num-envs 512 --curriculum-data-path data/ac_dataset_30k_64.npz
 ```
 
 For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
