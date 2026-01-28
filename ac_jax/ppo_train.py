@@ -770,7 +770,7 @@ if __name__ == "__main__":
                        help='Learning rate')
     parser.add_argument('--num-envs', type=int, default=1024,
                        help='Number of parallel environments')
-    parser.add_argument('--env-steps', type=int, default=5e7,
+    parser.add_argument('--env-steps', type=lambda x: int(float(x)), default=5e7,
                        help='Number of training frames.')
     parser.add_argument('--model-type', type=str,
                     choices=MODEL_TYPES,
