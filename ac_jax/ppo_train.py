@@ -760,7 +760,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='RL agent training',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--initial-pool', type=str, 
-                       default="data/initial_presentations_128.npy",
+                       default="data/initial_presentations_72.npy",
                        help='Path to initial pool data file')
     parser.add_argument('--curriculum-data-path', type=str,
                        help='Path to curriculum dataset', default=None)
