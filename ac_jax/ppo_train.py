@@ -763,7 +763,7 @@ if __name__ == "__main__":
                        default="data/initial_presentations_128.npy",
                        help='Path to initial pool data file')
     parser.add_argument('--curriculum-data-path', type=str,
-                       help='Path to curriculum dataset', required=True)
+                       help='Path to curriculum dataset', default=None)
     parser.add_argument('--curriculum-train', action='store_true',
                        help='Enable curriculum training')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
