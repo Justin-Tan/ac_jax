@@ -770,6 +770,8 @@ if __name__ == "__main__":
                        help='Learning rate')
     parser.add_argument('--num-envs', type=int, default=1024,
                        help='Number of parallel environments')
+    parser.add_argument('--env-steps', type=int, default=5e7,
+                       help='Number of training frames.')
     parser.add_argument('--model-type', type=str,
                     choices=MODEL_TYPES,
                     default='mlp',
@@ -782,12 +784,12 @@ if __name__ == "__main__":
         learning_rate: float = args.learning_rate
         num_envs: int = args.num_envs  # parallel envs - increase this to be 1024 at least!
         rollout_steps: int = 256  # steps per env, no. transitions = num_envs * rollout_steps
-        total_timesteps: float = 5e8  # stopping criterion; total no. of env steps
+        total_timesteps: float = args.env_steps  # stopping criterion; total no. of env steps
         update_epochs: int = 2  # 1 epoch - full pass through rollout data
         num_minibatches: int = 128  # rollout data splits
         horizon_length: int = 256  # max length of an episode
         gamma: float = 0.999
-        gae_lambda: float = 0.99
+        gae_lambda: float = 0.95
         gae_unrolls: int = 64
         clip_eps: float = 0.2
         entropy_coeff: float = 0.01
