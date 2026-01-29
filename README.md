@@ -55,7 +55,7 @@ This takes around 15 minutes on an NVIDIA RTX 5000, and consistently plateaus at
 
 For a more performant model, one may use instead the generated curriculum dataset above, toggle the curriculum training flag, and swap to a transformer-based agent;
 ```bash
-# run training for 200M frame.
+# run training for 200M frames.
 python3 -m ac_jax.ppo_train --model-type transformer --learning-rate 2.5e-4 --num-envs 2048 --env-steps 2e8 --curriculum-train --curriculum-data-path data/ac_dataset_35k_64.npz
 ```
 This takes around 4.5h on an NVIDIA RTX 5000, and should net around 500/1190 instances solved, which may be increased via top--k stochastic sampling from the policy.
