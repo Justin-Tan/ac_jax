@@ -1,8 +1,8 @@
 <h1 align='center'>ac-jax</h1>
-Reinforcement learning for the Andrews-Curtis conjecture. Essentially we would like to train an autonomous agent to find sequences of group operations which can trivialise a balanced presentation of the trivial group,
+Reinforcement learning for the Andrews-Curtis conjecture. Essentially we would like to train an autonomous agent to find sequences of group operations which trivialise a balanced presentation of the trivial group,
 
 $$
-\langle x_1, \ldots, x_n \, \vert \, r_1, \ldots, r_n \rangle \overset{\textsf{RL}}{\longrightarrow} \langle x_1, \ldots, x_n \, \vert \, x_1, \ldots, x_n \rangle
+\langle x_1, \ldots, x_n  \vert r_1, \ldots, r_n \rangle \overset{\textsf{RL}}{\longrightarrow} \langle x_1, \ldots, x_n  \vert  x_1, \ldots, x_n \rangle
 $$
 
 ## Installation
@@ -37,10 +37,10 @@ python3 -m ac_jax.env.generate_curriculum_data -h
 # generate data (example args)
 python3 -m ac_jax.env.generate_curriculum_data --total-easy 10000 --total-med 15000 --total-hard 10000 --fname data/ac_dataset_35k_64
 ```
-Note the compilation time for data generation may be long, but runs fast once compiled. 
+Note the compilation time for data generation may be long due to the loop logic, but it should run fast once compiled. 
 
 2. Train PPO agent
-The default architecture are two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1200 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo.
+The default architecture are two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1200 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo. 
 ```bash
 # check arguments
 python3 -m ac_jax.ppo_train -h
@@ -48,7 +48,7 @@ python3 -m ac_jax.ppo_train -h
 # check all hyperparameters
 vim ac_jax/ppo_train.py
 
-# run training for 50M frames by default
+# run training for 50M frames by default (may be slow to compile at the start)
 python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2.5e-4 --num-envs 1024 --env-steps 5e7
 ```
 This takes around 15 minutes on an NVIDIA RTX 5000, and consistently plateaus at around 330/1190 instances solved.
@@ -60,4 +60,5 @@ python3 -m ac_jax.ppo_train --model-type transformer --learning-rate 2.5e-4 --nu
 ```
 This takes around 4.5h on an NVIDIA RTX 5000, and should net around 500/1190 instances solved, which may be increased via top--k stochastic sampling from the policy.
 
-Metrics and checkpoints are locally captured and periodically saved to disk. [`ac_jax.evaluation`](ac_jax/evaluation.py) contains useful utilities for evaluating saved checkpoints. For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
+## Evaluation
+Metrics and checkpoints are locally captured and periodically saved to disk. [`ac_jax.evaluation`](ac_jax/evaluation.py) contains useful utilities for evaluating saved checkpoints, including top-k/beam search/MCTS logic using the value function as a heuristic. For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
