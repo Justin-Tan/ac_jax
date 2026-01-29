@@ -35,12 +35,12 @@ pip install -r requirements.txt
 python3 -m ac_jax.env.generate_curriculum_data -h
 
 # generate data (example args)
-python3 -m ac_jax.env.generate_curriculum_data --total-easy 10000 --total-med 10000 --total-hard 10000 --fname ac_dataset_30k_64
+python3 -m ac_jax.env.generate_curriculum_data --total-easy 10000 --total-med 15000 --total-hard 10000 --fname data/ac_dataset_35k_64
 ```
 Note the compilation time for data generation may be long, but runs fast once compiled. 
 
 2. Train PPO agent
-The default architecture are two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1000 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo.
+The default architecture are two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1200 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo.
 ```bash
 # check arguments
 python3 -m ac_jax.ppo_train -h
@@ -48,12 +48,16 @@ python3 -m ac_jax.ppo_train -h
 # check all hyperparameters
 vim ac_jax/ppo_train.py
 
-# run training
-python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2.5e-4 --num-envs 512
+# run training for 50M frames by default
+python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2.5e-4 --num-envs 1024 --env-steps 5e7
 ```
-For a more performant model, one may use instead the generated curriculum dataset above and swap to a transformer-based agent,
+This takes around 15 minutes on an NVIDIA RTX 5000, and consistently plateaus at around 330/1190 instances solved.
+
+For a more performant model, one may use instead the generated curriculum dataset above, toggle the curriculum training flag, and swap to a transformer-based agent;
 ```bash
-# run training
-python3 -m ac_jax.ppo_train --model-type transformer --learning-rate 2.5e-4 --num-envs 1024 --curriculum-data-path data/ac_dataset_30k_64.npz
+# run training for 200M frame.
+python3 -m ac_jax.ppo_train --model-type transformer --learning-rate 2.5e-4 --num-envs 2048 --env-steps 2e8 --curriculum-train --curriculum-data-path data/ac_dataset_35k_64.npz
 ```
-For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
+This takes around 4.5h on an NVIDIA RTX 5000, and should net around 500/1190 instances solved, which may be increased via top--k stochastic sampling from the policy.
+
+Metrics and checkpoints are locally captured and periodically saved to disk. [`ac_jax.evaluation`](ac_jax/evaluation.py) contains useful utilities for evaluating saved checkpoints. For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
