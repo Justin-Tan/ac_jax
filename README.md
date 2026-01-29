@@ -29,7 +29,7 @@ pip install -r requirements.txt
 * The transition logic for synchronous processing of environments necessary for parallelisation on GPU is contained in [`ac_jax.env.curriculum`](ac_jax/env/curriculum.py).
 * Data generation routines are provided in [`ac_jax.env.generate_curriculum_data`](ac_jax/env/generate_curriculum_data.py). This generates balanced presentations randomly scrambled from the trivial presentation via a sequence of elementary AC moves. The resulting dataset is divided into tiers of difficulty balanced on the scramble depth and is intended to be used in a curriculum learning schedule.
 
-1. Generate curriculum data
+#### 1. Generate curriculum data
 ```bash
 # check arguments
 python3 -m ac_jax.env.generate_curriculum_data -h
@@ -39,8 +39,8 @@ python3 -m ac_jax.env.generate_curriculum_data --total-easy 10000 --total-med 15
 ```
 Note the compilation time for data generation may be long due to the loop logic, but it should run fast once compiled. 
 
-2. Train PPO agent
-The default architecture are two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1200 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo. 
+#### 2. Train PPO agent
+The default architecture consists of two independent fully connected networks parameterising the actor and critic. By default we train on a small dataset consisting of ~1200 balanced presentations of the Miller-Schupp series outlined in [Shehper et. al.](https://arxiv.org/abs/2408.15332) which is included in this repo. 
 ```bash
 # check arguments
 python3 -m ac_jax.ppo_train -h
@@ -48,17 +48,17 @@ python3 -m ac_jax.ppo_train -h
 # check all hyperparameters
 vim ac_jax/ppo_train.py
 
-# run training for 50M frames by default (may be slow to compile at the start)
+# run training for 50M frames (may be slow to compile at the start)
 python3 -m ac_jax.ppo_train --model-type mlp --learning-rate 2.5e-4 --num-envs 1024 --env-steps 5e7
 ```
-This takes around 15 minutes on an NVIDIA RTX 5000, and consistently plateaus at around 330/1190 instances solved.
-
-For a more performant model, one may use instead the generated curriculum dataset above, toggle the curriculum training flag, and swap to a transformer-based agent;
+* This takes around 15 minutes on an NVIDIA RTX 5000, and consistently plateaus at around 330/1190 of the above Miller-Schupp instances solved.
+* For a more performant model, one may use instead the generated curriculum dataset above, toggle the curriculum training flag, and swap to a transformer-based agent;
 ```bash
 # run training for 200M frames.
 python3 -m ac_jax.ppo_train --model-type transformer --learning-rate 2.5e-4 --num-envs 2048 --env-steps 2e8 --curriculum-train --curriculum-data-path data/ac_dataset_35k_64.npz
 ```
-This takes around 4.5h on an NVIDIA RTX 5000, and should net around 500/1190 instances solved, which may be increased via top--k stochastic sampling from the policy.
+* This takes around 4.5h on an RTX 5000, and should net around 480/1190 instances solved, which may be increased via top--k stochastic sampling from the policy.
+* Diminishing returns; increasing the number of samples in the curriculum dataset to $O(10^6)$ will see the transformer-based agent plateau at about 510/1190 instances solved in 5e8 frames. A more principled reward structure/increased horizon length/longer maximum relator length may be necessary for an RL agent to reliably crack the other half of the dataset. 
 
 ## Evaluation
 Metrics and checkpoints are locally captured and periodically saved to disk. [`ac_jax.evaluation`](ac_jax/evaluation.py) contains useful utilities for evaluating saved checkpoints, including top-k/beam search/MCTS logic using the value function as a heuristic. For more details regarding the agent and implementation, please see [this short report](assets/ac_jax_report.pdf).
