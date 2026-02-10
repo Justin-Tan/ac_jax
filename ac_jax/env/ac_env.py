@@ -136,7 +136,7 @@ class ACEnv(jumanji.env.Environment[State, specs.DiscreteArray, Observation]):
 
         length_increase_reward, length_decrease_reward = -1e-1 * delta_length, -delta_length  # jnp.exp(delta_length)
         reward = self.max_reward * done - (1 - done) * presentation_length
-        exponent_sum_matrix = utils.get_exponent_sum_matrix(new_presentation)
+        # exponent_sum_matrix = utils.get_exponent_sum_matrix(new_presentation)
         # reward = self.max_reward * done - (1 - done) * jnp.linalg.norm(jnp.abs(exponent_sum_matrix) - self.identity) / 10.
         #reward = (1 - done) * jnp.where(delta_length > 0, length_increase_reward, length_decrease_reward) \
         #         + done * self.max_reward

@@ -3,6 +3,8 @@ import jax.numpy as jnp
 from jax import lax, random, vmap, jit
 
 import functools
+
+import mctx
 from ac_jax import agents, logging, ppo_train
 from ac_jax.env import ac_env, curriculum, types, utils    
 
@@ -72,7 +74,114 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
                 "entropy_history": entropy_history.T,
                 "length_history": lengths_v_time.T}  # (B, T)
 
+    def heuristic_fn(self, obs):
+        return jnp.shape(obs)[-1] - 2.0
 
+    @functools.partial(jit, static_argnums=(0,3,4,5))
+    def _evaluate_batch_mcts_custom_heuristic(self, params, key, heuristic_fn, 
+                             n_simulations=256, max_depth=None):
+        # evaluate n_eval environments in parallel
+        eval_idx = jnp.arange(self.n_eval)
+        key, subkey, _subkey, __subkey = random.split(key, 4)
+        reset_keys = random.split(__subkey, self.n_eval)
+        states, timesteps = vmap(self.eval_env.reset_to_idx)(reset_keys, eval_idx)
+        # could the evolved heuristic output dummy logits to rank actions?
+        dummy_logits = jnp.zeros((self.n_eval, self.eval_env.n_actions))
+
+        def _recurrent_fn(self, params, rng, action, embedding):
+            # Simulates one environment step inside MCTS phase.
+            state = embedding
+            next_state, next_timestep = vmap(self.eval_env.step)(
+                state, action)
+            obs, next_obs = state.presentation, next_state.presentation
+            values = vmap(heuristic_fn)(next_obs)
+            logits = dummy_logits
+
+            reward = next_timestep.reward
+            discount = next_timestep.discount
+
+            recurrent_fn_output = mctx.RecurrentFnOutput(
+                reward=reward, discount=discount,
+                prior_logits=logits, value=values)
+            return recurrent_fn_output, next_state
+
+        def _eval_step(carry, sentinel):
+            state, timestep, key = carry
+            key, mcts_key = random.split(key)
+            obs = timestep.observation.presentation
+            root_value = vmap(heuristic_fn)(obs)
+            root_logits = dummy_logits  # (B, A)
+            root = mctx.RootFnOutput(
+                prior_logits=root_logits,
+                value=root_value,
+                embedding=state)
+            
+            #action selection
+            policy_output = mctx.gumbel_muzero_policy(
+                params=params,
+                rng_key=mcts_key,
+                root=root,
+                recurrent_fn=self.recurrent_fn,
+                num_simulations=n_simulations,
+                max_depth=max_depth,
+                max_num_considered_actions=self.eval_env.n_actions,
+            )
+            
+            actions = policy_output.action
+            next_state, next_timestep = vmap(self.eval_env.step)(state, actions)
+            return (next_state, next_timestep, key), next_timestep
+        
+        init_carry = (states, timesteps, _subkey)
+        # run over full horizon and check if solved at any step
+        (final_state, final_timestep, _subkey), eval_rollout = jax.lax.scan(
+            _eval_step, init_carry, None, self.config.horizon_length)
+        
+        # eval_rollout: (T, B, ...)
+        flattened_rollout_data = jax.tree_util.tree_map(lambda x: x.reshape((-1,)+ x.shape[2:]),
+                                                        eval_rollout)
+        
+        flattened_obs = flattened_rollout_data.observation.presentation
+        flattened_lengths = vmap(utils.presentation_length)(flattened_obs)
+        flattened_lengths = jnp.sum(flattened_lengths, axis=-1)
+
+        lengths_v_time = flattened_lengths.reshape((self.config.horizon_length, self.n_eval))
+        min_lengths_over_time = jnp.min(lengths_v_time, axis=0)
+
+        solved = min_lengths_over_time == 2
+        n_solved = jnp.sum(solved).astype(jnp.int32)
+
+        solved_mask_t = (lengths_v_time == 2)  # (T, B)
+        is_solved = jnp.any(solved_mask_t, axis=0)
+        _first_solved_idx = jnp.argmax(solved_mask_t, axis=0)  # (B,)
+        time_idx = jnp.arange(self.config.horizon_length)[:, None]
+
+        end_idx = jnp.where(is_solved, _first_solved_idx, self.config.horizon_length - 1)
+        reward_mask = time_idx <= end_idx[None,:]
+        episode_returns = jnp.sum(eval_rollout.reward * reward_mask, axis=0)  # (B,)
+        mean_terminal_return = jnp.sum(is_solved * episode_returns) / jnp.maximum(n_solved, 1)
+        max_reward = jnp.max(eval_rollout.reward)
+
+        return {"solved_rate_eval": jnp.mean(solved), "n_solved_eval": n_solved,
+                "avg_min_length_eval": jnp.mean(min_lengths_over_time),
+                "max_reward_eval": max_reward,
+                "mean_terminal_return_eval": mean_terminal_return}    
+
+    def evaluate_dataset_batched_mcts(self, params, key, batch_size=256, n_simulations=32, max_depth=None):
+        import tqdx
+        """
+        Batchwise evaluation over entire eval dataset using MCTS.
+        """
+        n_total = self.n_eval
+        n_padded = (n_total + batch_size - 1) // batch_size * batch_size
+        indices = jnp.arange(n_padded) % n_total
+        valid_mask = jnp.arange(n_padded) < n_total
+
+        n_batches = n_padded // batch_size
+        batched_indices = indices.reshape(n_batches, batch_size)
+        batched_mask = valid_mask.reshape(n_batches, batch_size)
+        keys = random.split(key, n_batches)
+
+        raise NotImplementedError("MCTS evaluation pending")
 
     @functools.partial(jit, static_argnums=(0, 3, 4, 5))
     def evaluate_dataset_batched(self, params, key, batch_size=512, k=16, stochastic=True):
