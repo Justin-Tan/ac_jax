@@ -18,7 +18,7 @@ TOP_K = 40
 MIN_P = 1e-2
 REP_PENALTY = 1.0
 
-with open("evolution/instructions_AC.md", "r", encoding="utf-8") as f: 
+with open("context/instructions_AC.md", "r", encoding="utf-8") as f: 
     _INSTRUCTIONS = f.read()
 
 client = AsyncOpenAI(base_url=BASE_URL, api_key="EMPTY")
@@ -34,7 +34,7 @@ async def get_heuristic(i):
             model=MODEL_NAME,
             instructions=_INSTRUCTIONS,
             input=_CONTEXT_i,
-            max_tokens=MAX_TOKENS,
+            max_output_tokens=MAX_TOKENS,
             temperature=TEMPERATURE,
             top_p=TOP_P,
             extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}

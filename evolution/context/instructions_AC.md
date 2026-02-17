@@ -47,7 +47,7 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
     * Keep comments minimal but informative. 
 
 ## Interface
-Adhere to the following template, maintaining the function signature. We will extract the code enclosed between [EVOLVE-BLOCK-START] and [EVOLVE-BLOCK-END], your modification, including any comments, must stay between the delimiters.
+Adhere to the following template, maintaining the function signature. We will extract the code enclosed between [EVOLVE-BLOCK-START] and [EVOLVE-BLOCK-END], your modification, including any comments, must stay between the delimiters. Output a single function only and keep explanatory remarks in comments.
 
 ```python
 import jax
