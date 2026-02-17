@@ -74,8 +74,21 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
                 "entropy_history": entropy_history.T,
                 "length_history": lengths_v_time.T}  # (B, T)
 
-    def heuristic_fn(self, obs):
-        return jnp.shape(obs)[-1] - 2.0
+    def heuristic_fn(self, observation: jnp.ndarray) -> float:
+        """
+        Baseline heuristic: difference between current presentation length and length of
+        trivial presentation (2).
+        
+        Args:
+            observation: Array representing current group presentation in terms of relators
+                [r_1; r_2]. Shape (2 * max_relator_length,).
+        
+        Returns:
+            Heuristic value estimating desirability of expansion in MCTS to the trivial 
+            presentation (lower is better).
+        """
+        presentation_length = jnp.sum(utils.presentation_length(observation))
+        return -(presentation_length - 2.0)
 
     @functools.partial(jit, static_argnums=(0,3,4,5))
     def _evaluate_batch_mcts_custom_heuristic(self, params, key, heuristic_fn, 
