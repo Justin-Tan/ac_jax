@@ -30,7 +30,7 @@ async def get_heuristic(i):
     start = time.time()
     _CONTEXT_i = f"Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v{i}`."
     try:
-        await client.responses.create(
+        result = await client.responses.create(
             model=MODEL_NAME,
             instructions=_INSTRUCTIONS,
             input=_CONTEXT_i,
@@ -40,7 +40,7 @@ async def get_heuristic(i):
             extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
         )
         latency = time.time() - start
-        return latency
+        return result.output_text, latency
     except Exception as e:
         print(f"Request {i} failed: {e}")
         return None
@@ -51,11 +51,16 @@ async def main():
     
     # Launch all requests effectively "at once"
     tasks = [get_heuristic(i) for i in range(CONCURRENCY)]
-    latencies = await asyncio.gather(*tasks)
+    results, latencies = await asyncio.gather(*tasks)
     
     total_time = time.time() - start_total
     valid_latencies = [l for l in latencies if l is not None]
     
+    combined = "\n\n---\n\n".join(results)
+    with open("output.md", "w", encoding="utf-8") as f:
+        f.write(combined)
+    print("Saved to output.md")
+
     print(f"\n--- Results on GH200 ---")
     print(f"Total Wall Time:  {total_time:.4f}s")
     print(f"Avg Latency:      {np.mean(valid_latencies):.4f}s")
