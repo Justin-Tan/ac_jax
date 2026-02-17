@@ -9,7 +9,7 @@ from typing import Sequence, Any
 from collections.abc import Iterator, MutableSet, Sequence
 
 from ac_jax import logging
-from evolution import types
+from evolution import code_types
 
 def _tokenize(code: str) -> Iterator[tokenize.TokenInfo]:
     """Transforms `code` into Python tokens."""

@@ -7,7 +7,7 @@ import ast
 
 from typing import Sequence, Any
 
-from evolution import code_utils, types
+from evolution import code_types, code_utils
 
 class _FunctionLineVisitor(ast.NodeVisitor):
     """Visitor that finds the last line number of a function with a given name."""
@@ -49,7 +49,7 @@ def _trim_function_body(generated_code: str) -> str:
     body_lines = code.splitlines()[1:visitor.function_end_line]
     return '\n'.join(body_lines) + '\n\n'
 
-def _sample_to_program(generated_code: str, version_generated: int | None, template: types.Program, 
+def _sample_to_program(generated_code: str, version_generated: int | None, template: code_types.Program, 
                       function_to_evolve: str) -> tuple[code_utils.Function, str]:
     """Returns parsed function and python executable as string"""
 
@@ -127,7 +127,7 @@ class Evaluator:
     """
 
     def __init__(
-        self, database, template: types.Program, function_to_evolve: str, function_to_run: str,
+        self, database, template: code_types.Program, function_to_evolve: str, function_to_run: str,
         inputs: Sequence[Any], timeout_seconds: int = 60):
         """        
         template: base program scaffold (imports, helper fundefs, target docstring)
