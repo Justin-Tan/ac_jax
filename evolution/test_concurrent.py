@@ -6,7 +6,7 @@ import numpy as np
 import jax.numpy as jnp
 
 # Configuration
-CONCURRENCY = 16
+CONCURRENCY = 32
 BASE_URL = "http://localhost:8003/v1/"
 MODEL_NAME = "unsloth/Qwen3-Coder-Next"
 MAX_MODEL_LEN = 8192  # must agree with server config
@@ -40,7 +40,7 @@ async def get_heuristic(i):
             extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
         )
         latency = time.time() - start
-        return result.output_text, latency
+        return _CONTEXT_i, latency,  result.output_text
     except Exception as e:
         print(f"Request {i} failed: {e}")
         return None
@@ -51,12 +51,23 @@ async def main():
     
     # Launch all requests effectively "at once"
     tasks = [get_heuristic(i) for i in range(CONCURRENCY)]
-    results, latencies = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
     
+    latencies, parts = [], []
+    for i, (prompt, latency_s, output) in enumerate(results, start=1):
+        latencies.append(latency_s)
+        parts.append(
+            f"## Request {i}\n"
+            f"**Prompt:** {prompt}\n\n"
+            f"**Latency:** {latency_s:.3f} s\n\n"
+            f"**Output:**\n\n{output}\n"
+        )
+
     total_time = time.time() - start_total
     valid_latencies = [l for l in latencies if l is not None]
     
-    combined = "\n\n---\n\n".join(results)
+    print(results)
+    combined = "\n\n---\n\n".join(parts)
     with open("output.md", "w", encoding="utf-8") as f:
         f.write(combined)
     print("Saved to output.md")
