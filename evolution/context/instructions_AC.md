@@ -49,16 +49,20 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
 3. **Evolution:**
     * You may receive as input previous versions of `heuristic_fn_v{i}`, ordered by evaluation performance.
     * Your goal is to **mutate** the logic of previous examples to capture deeper geometric properties (e.g., minimising total length, maximising cancellation pairs, detecting palindromes).
-    * Always make some semantic change, though this may be incremental.
+    * Always make some structural change, though this may be incremental. Briefly justify how the structural changes you are making may improve agent performance.
     * Keep comments minimal but informative. 
 
 ## Interface
-Strictly adhere to the following template, maintaining the function signature. We will extract the code enclosed between [EVOLVE-BLOCK-START] and [EVOLVE-BLOCK-END]. The meaningful content of your modification, must stay between the delimiters, which should be maintained in the output. Output a single function only and explain the modification briefly in the docstring.
+Strictly adhere to the following template, maintaining the function signature. We will extract the code enclosed between [EVOLVE-BLOCK-START] and [EVOLVE-BLOCK-END]. 
+* Only modify code between these delimiters.
+* Output a single function only.
+* Explain the modification briefly in the docstring.
 
 ```python
 import jax
 import jax.numpy as jnp
 
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
     """
     Assign an integer to each generator, and assign its negation to the inverse generator. We encode a presentation $\langle x_1, x_2 : r_1, r_2 \rangle$ solely in terms of the relators $r_i$, as the concatenation of two integer arrays denoting the definition of each relator.
@@ -73,17 +77,16 @@ def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
 
-    # [EVOLVE-BLOCK-START]
-
-    # Example baseline logic: negative total length
+    # Example baseline logic: negative normalised presentation length
     # is_generator = jnp.abs(presentation) > 0
     # total_length = jnp.sum(is_generator)
-    # return -1. * total_length
+    # return -1. * total_length / MAX_PRESENTATION_LENGTH
 
     # [EVOLVE-BLOCK-END]
 ```
-
 
 We will extract the function from the code you generate. It will be used as a heuristic and scored via the MCTS evaluator on an independent validation dataset. Top--scoring programs will be saved to a database and used as the basis for future generations of the heuristic.  

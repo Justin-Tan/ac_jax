@@ -74,33 +74,42 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
                 "entropy_history": entropy_history.T,
                 "length_history": lengths_v_time.T}  # (B, T)
 
-    def heuristic_fn(self, observation: jnp.ndarray) -> float:
+    def heuristic_fn(self, presentation: jnp.ndarray) -> float:
         """
-        Baseline heuristic: difference between current presentation length and length of
-        trivial presentation (2).
+        Assign an integer to each generator, and assign its negation to the inverse generator. We encode a presentation $\langle x_1, x_2 : r_1, r_2 \rangle$ solely in terms of the relators $r_i$, as the concatenation of two integer arrays denoting the definition of each relator.
+
+        Baseline heuristic: current presentation length
         
         Args:
-            observation: Array representing current group presentation in terms of relators
-                [r_1; r_2]. Shape (2 * max_relator_length,).
+            presentation: Array representing current group presentation in terms of relators
+                [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
         
         Returns:
-            Heuristic value estimating desirability of expansion in MCTS to the trivial 
-            presentation (lower is better).
+            Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
+            future (higher is better).
         """
-        presentation_length = jnp.sum(utils.presentation_length(observation))
-        return -(presentation_length - 2.0)
+        N_GENERATORS = 2
+        MAX_RELATOR_LENGTH = 36
+        MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
 
-    @functools.partial(jit, static_argnums=(0,3,4,5))
-    def _evaluate_batch_mcts_custom_heuristic(self, params, key, heuristic_fn, 
-                             n_simulations=256, max_depth=None):
-        # evaluate n_eval environments in parallel
-        eval_idx = jnp.arange(self.n_eval)
+        # Example baseline logic: negative normalised presentation length
+        is_generator = jnp.abs(presentation) > 0
+        total_length = jnp.sum(is_generator)
+        return -1. * total_length / MAX_PRESENTATION_LENGTH
+
+
+    @functools.partial(jit, static_argnums=(0,2,3,4,5,6))
+    def _evaluate_mcts_custom_heuristic(self, key, heuristic_fn, 
+                             n_simulations=256, max_depth=None, batch_idx=None,
+                             batch_size=None):
+        # evaluate batch_size environments in parallel
         key, subkey, _subkey, __subkey = random.split(key, 4)
-        reset_keys = random.split(__subkey, self.n_eval)
-        states, timesteps = vmap(self.eval_env.reset_to_idx)(reset_keys, eval_idx)
+        reset_keys = random.split(__subkey, batch_size)
+        states, timesteps = vmap(self.eval_env.reset_to_idx)(reset_keys, batch_idx)
         # could the evolved heuristic output dummy logits to rank actions?
-        dummy_logits = jnp.zeros((self.n_eval, self.eval_env.n_actions))
+        dummy_logits = jnp.zeros((batch_size, self.eval_env.n_actions))
 
+        # mctx expects a fixed signature
         def _recurrent_fn(self, params, rng, action, embedding):
             # Simulates one environment step inside MCTS phase.
             state = embedding
@@ -131,7 +140,7 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
             
             #action selection
             policy_output = mctx.gumbel_muzero_policy(
-                params=params,
+                params=None,
                 rng_key=mcts_key,
                 root=root,
                 recurrent_fn=self.recurrent_fn,
@@ -179,7 +188,9 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
                 "max_reward_eval": max_reward,
                 "mean_terminal_return_eval": mean_terminal_return}    
 
-    def evaluate_dataset_batched_mcts(self, params, key, batch_size=256, n_simulations=32, max_depth=None):
+    @functools.partial(jit, static_argnums=(0,2,3,4,5))
+    def _evaluate_dataset_mcts_batched(self, key, heuristic_fn, batch_size=256,
+                             n_simulations=256, max_depth=None):
         import tqdx
         """
         Batchwise evaluation over entire eval dataset using MCTS.
@@ -194,8 +205,33 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         batched_mask = valid_mask.reshape(n_batches, batch_size)
         keys = random.split(key, n_batches)
 
-        raise NotImplementedError("MCTS evaluation pending")
+        def _eval_batch(carry, inputs):
+            batch_idx, mask, batch_key = inputs
 
+            batch_metrics = self._evaluate_mcts_custom_heuristic(batch_key,  heuristic_fn,
+                n_simulations=n_simulations, max_depth=max_depth, batch_idx=batch_idx, batch_size=batch_size)
+            
+            stats = {
+                "n_solved": jnp.sum(batch_metrics["n_solved_eval"] * mask),
+                "max_reward": jnp.max(batch_metrics["max_reward_eval"] * mask),  # 
+            }
+            new_carry = jax.tree.map(lambda c, s: c + s, carry, stats)
+            new_carry["max_reward"] = jnp.maximum(carry["max_reward"], stats["max_reward"])
+
+            _subtotal_metrics = {"idx": batch_idx}
+            _subtotal_metrics.update(batch_metrics)
+            return new_carry, _subtotal_metrics
+
+        init_stats = {
+            "n_solved": 0, "max_reward": -1e9
+        }
+
+        final_stats, total_metrics = tqdx.scan(_eval_batch, init_stats,
+            (batched_indices, batched_mask, keys))
+        n_solved = final_stats["n_solved"].astype(jnp.int32)
+
+        return final_stats, total_metrics
+    
     @functools.partial(jit, static_argnums=(0, 3, 4, 5))
     def evaluate_dataset_batched(self, params, key, batch_size=512, k=16, stochastic=True):
         import tqdx
@@ -212,7 +248,6 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         batched_mask = valid_mask.reshape(n_batches, batch_size)
         keys = random.split(key, n_batches)
 
-        # 2. Define the Scan Function (Processes one batch)
         def _eval_batch(carry, inputs):
             batch_idx, mask, batch_key = inputs
 
