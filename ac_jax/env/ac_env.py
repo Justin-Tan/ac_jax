@@ -173,6 +173,19 @@ class ACEnv(jumanji.env.Environment[State, specs.DiscreteArray, Observation]):
         observation = Observation(presentation=new_presentation)
         timestep = self._get_timestep(observation, reward, done, truncated)
         return new_state, timestep
+    
+
+    def _step(self, presentation, action):
+        # minimal step
+        new_presentation, lengths = move(presentation, action)
+        presentation_length = jnp.sum(lengths)
+        done = presentation_length == 2
+
+        reward = self.max_reward * done - (1 - done) * presentation_length
+        truncated = False # state.step_count + 1 >= self.horizon_length
+        observation = Observation(presentation=new_presentation)
+        timestep = self._get_timestep(observation, reward, done, truncated)
+        return new_presentation, timestep
 
     def _get_timestep(self, obs, reward, done, truncated):
         status = jax.lax.cond(done,

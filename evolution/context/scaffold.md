@@ -1,9 +1,12 @@
 ```python
+<<<<<<< HEAD
+```python
 import jax
 import jax.numpy as jnp
 
-def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
-    """
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
     Assign an integer to each generator, and assign its negation to the inverse generator. We encode a presentation $\langle x_1, x_2 : r_1, r_2 \rangle$ solely in terms of the relators $r_i$, as the concatenation of two integer arrays denoting the definition of each relator.
 
     Baseline heuristic: current presentation length
@@ -16,7 +19,6 @@ def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # [EVOLVE-BLOCK-START]
 
     # Example baseline logic: negative total length
     is_generator = jnp.abs(presentation) > 0
@@ -25,4 +27,3 @@ def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
 
     # [EVOLVE-BLOCK-END]
 ```
-

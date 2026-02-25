@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import ast
 
 import dataclasses
-import io
+import io, re
 import tokenize
 from typing import Sequence, Any
 from collections.abc import Iterator, MutableSet, Sequence
@@ -11,12 +11,30 @@ from collections.abc import Iterator, MutableSet, Sequence
 from ac_jax import logging
 from evolution import code_types
 
+
+def text_to_program(text: str) -> code_types.Program:
+    """Returns Program object by parsing input text using Python AST."""
+    # Strip markdown code blocks if present
+    pattern = r"```(?:python|py)?\n(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        text = match.group(1).strip()
+    try:
+        # We assume that the program is composed of some preface (e.g. imports,
+        # classes, assignments, ...) followed by a sequence of functions.
+        tree = ast.parse(text)
+        visitor = code_types.ProgramVisitor(text)
+        visitor.visit(tree)
+        return visitor.return_program()
+    except Exception as e:
+        logging.warning('Failed parsing %s', text)
+        raise e
+
 def _tokenize(code: str) -> Iterator[tokenize.TokenInfo]:
     """Transforms `code` into Python tokens."""
     code_bytes = code.encode()
     code_io = io.BytesIO(code_bytes)
     return tokenize.tokenize(code_io.readline)
-
 
 def _untokenize(tokens: Sequence[tokenize.TokenInfo]) -> str:
     """Transforms a list of Python tokens into code."""
