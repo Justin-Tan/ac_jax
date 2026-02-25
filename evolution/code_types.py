@@ -10,7 +10,7 @@ class Heuristics(NamedTuple):
 class ProgramDatabase(NamedTuple):
     programs: List[Heuristics]
     islands: int
-    
+
 class Prompt(NamedTuple):
   """A prompt produced by the ProgramsDatabase, to be sent to Samplers.
 
@@ -91,7 +91,7 @@ class Program:
     def get_function(self, function_name: str) -> Function:
         index = self.find_function_index(function_name)
         return self.functions[index]
-    
+
 class Task(NamedTuple):
     """Input to evaluation pipeline."""
     candidate_id: int
@@ -101,17 +101,17 @@ class Task(NamedTuple):
 
 class ProgramVisitor(ast.NodeVisitor):
     """Parses code to collect all required information to produce a `Program`.
-    
+
     Note that we do not store function decorators.
     """
-    
+
     def __init__(self, sourcecode: str):
         self._codelines: list[str] = sourcecode.splitlines()
-    
+
         self._preface: str = ''
         self._functions: list[Function] = []
         self._current_function: str | None = None
-    
+
     def visit_FunctionDef(self,  # pylint: disable=invalid-name
                             node: ast.FunctionDef) -> None:
         """Collects all information about the function being parsed."""
@@ -130,7 +130,7 @@ class ProgramVisitor(ast.NodeVisitor):
                     body_start_line = node.body[1].lineno - 1
                 else:
                     body_start_line = function_end_line
-        
+
             self._functions.append(Function(
                 name=node.name,
                 args=ast.unparse(node.args),
@@ -143,3 +143,7 @@ class ProgramVisitor(ast.NodeVisitor):
 
     def return_program(self) -> Program:
         return Program(preface=self._preface, functions=self._functions)
+
+
+# Sentinel for heuristics pub/sub queue shutdown (evolution pub/sub).
+HEURISTICS_QUEUE_SHUTDOWN = object()
