@@ -1,9 +1,6 @@
 """Class for evaluating programs proposed by the Sampler."""
 
-from copy import copy
-import jax
-import jax.numpy as jnp
-import ast, re
+import ast, re, copy
 import textwrap
 
 from typing import Sequence, Any
@@ -60,14 +57,13 @@ def _trim_function_body(generated_code: str) -> str:
     return '\n'.join(body_lines) + '\n\n'
 
 def _sample_to_program(generated_code: str, version_generated: int | None, template: code_types.Program, 
-                      function_to_evolve: str) -> tuple[code_utils.Function, str]:
+                      function_to_evolve: str) -> tuple[code_types.Function, str]:
     """Returns parsed function and python executable as string"""
 
     # preflight validation
-    if not _validate_sample(generated_code):
-        raise ValueError(f'Warning: code generated contains questionable commands!\n{generated_code}')
-
     body = _trim_function_body(generated_code)
+    if not _validate_sample(body):
+        raise ValueError(f'Warning: code generated could not be parsed/contains unsafe commands.!\n{generated_code}')
 
     if version_generated is not None:  # rename recursive calls
         body = code_utils.rename_function_calls(body,
@@ -87,11 +83,16 @@ class SecurityViolation(Exception):
 
 def _validate_sample(sample: str) -> bool:
     # minimal validation, non-comprehensive
-    wrapped_code = f"def safety_dummy_header():\n{sample}"
+
     try:
-        tree = ast.parse(wrapped_code)
+        tree = ast.parse(sample)
     except SyntaxError:
-        return False
+        wrapped_code = f"def safety_dummy_header():\n{sample}"
+        try:
+            tree = ast.parse(wrapped_code)
+        except SyntaxError:
+            print('could not parse function!')
+            return False
     
     banned_calls = {'eval', 'exec', 'compile', 'open', 'input', 
         '__import__', 'globals', 'locals', 'super', 'getattr', 'setattr'}

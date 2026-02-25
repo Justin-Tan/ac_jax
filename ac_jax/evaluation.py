@@ -222,7 +222,7 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
                 "max_reward_eval": max_reward,
                 "mean_terminal_return_eval": mean_terminal_return}
 
-    @functools.partial(jit, static_argnums=(0,2,3,4,5,6))
+    @functools.partial(jit, static_argnums=(0,2,3,4,6))
     def _evaluate_mcts_custom_heuristic(self, key, heuristic_fn, 
                              n_simulations=256, max_depth=None, batch_idx=None,
                              batch_size=None):
@@ -234,7 +234,7 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         dummy_logits = jnp.zeros((batch_size, self.eval_env.n_actions))
 
         # mctx expects a fixed signature
-        def _recurrent_fn(self, params, rng, action, embedding):
+        def _recurrent_fn(params, rng, action, embedding):
             # Simulates one environment step inside MCTS phase.
             # minimal step implementation
             presentation = embedding
@@ -291,7 +291,7 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         flattened_lengths = vmap(utils.presentation_length)(flattened_obs)
         flattened_lengths = jnp.sum(flattened_lengths, axis=-1)
 
-        lengths_v_time = flattened_lengths.reshape((self.config.horizon_length, self.n_eval))
+        lengths_v_time = flattened_lengths.reshape((self.config.horizon_length, batch_size))
         min_lengths_over_time = jnp.min(lengths_v_time, axis=0)
 
         solved = min_lengths_over_time == 2
@@ -311,7 +311,8 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         return {"solved_rate_eval": jnp.mean(solved), "n_solved_eval": n_solved,
                 "avg_min_length_eval": jnp.mean(min_lengths_over_time),
                 "max_reward_eval": max_reward,
-                "mean_terminal_return_eval": mean_terminal_return}    
+                "mean_terminal_return_eval": mean_terminal_return,
+                "min_lengths": min_lengths_over_time}
 
     @functools.partial(jit, static_argnums=(0,2,3,4,5))
     def _evaluate_dataset_mcts_batched(self, key, heuristic_fn, batch_size=256,
@@ -333,17 +334,20 @@ class PPOTrainerCurriculumEval(ppo_train.PPOTrainer):
         def _eval_batch(carry, inputs):
             batch_idx, mask, batch_key = inputs
 
-            batch_metrics = self._evaluate_mcts_custom_heuristic(batch_key,  heuristic_fn,
+            batch_metrics = self._evaluate_mcts_custom_heuristic(batch_key, heuristic_fn,
                 n_simulations=n_simulations, max_depth=max_depth, batch_idx=batch_idx, batch_size=batch_size)
             
+            solved = (batch_metrics["min_lengths"] == 2) * mask
+            n_solved = jnp.sum(solved).astype(jnp.int32)
             stats = {
-                "n_solved": jnp.sum(batch_metrics["n_solved_eval"] * mask),
+                "n_solved": n_solved,
                 "max_reward": jnp.max(batch_metrics["max_reward_eval"] * mask),  # 
             }
+            batch_metrics["n_solved_eval"] = n_solved
             new_carry = jax.tree.map(lambda c, s: c + s, carry, stats)
             new_carry["max_reward"] = jnp.maximum(carry["max_reward"], stats["max_reward"])
 
-            _subtotal_metrics = {"idx": batch_idx}
+            _subtotal_metrics = {"idx": batch_idx, "mask": mask}
             _subtotal_metrics.update(batch_metrics)
             return new_carry, _subtotal_metrics
 
