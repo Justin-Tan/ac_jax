@@ -1,108 +1,84 @@
 ## Request 1
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v0`.
 
-**Latency:** 29.196 s
+**Latency:** 16.789 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
+    r"""
+    Modified heuristic focusing on cancellation potential and structural simplicity.
+    
+    Key improvements over baseline length-based heuristic:
+    1. Counts maximal cancellation pairs (adjacent inverse pairs within each relator)
+    2. Penalizes non-trivial relator structure (measured by run lengths and patterns)
+    3. Rewards symmetry (palindromic structure) which often indicates potential for simplification
+    4. Tracks identity elements (0 padding) to estimate current simplification level
+    
+    This heuristic better captures the "structure" needed for successful trivialization
+    even when presentations temporarily grow in length during the trivialization process.
     """
-    Heuristic for evaluating group presentations in the trivial group recognition problem.
-    This function estimates the likelihood that a presentation can be trivialized via AC moves.
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    Key improvements over baseline:
-    1. Counts cancellation pairs (adjacent inverse generators) within each relator
-    2. Penalizes long presentations but with diminishing returns to avoid over-penalization
-    3. Detects palindromic structure which often indicates symmetry conducive to trivialization
-    4. Counts repeated substrings that might be candidates for simplification
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
     # Split into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper to process a single relator
-    def process_relators(relator):
-        # Count non-zero elements to get actual length
-        is_nonzero = jnp.abs(relator) > 0
-        length = jnp.sum(is_nonzero)
-        
-        # Count cancellation pairs: positions where consecutive elements are inverses
-        # (e.g., [1, -1, 2, 1] has one cancellation pair at positions 0-1)
+    # Mask non-padding elements
+    r1_mask = r1 != 0
+    r2_mask = r2 != 0
+    
+    # Count actual elements in each relator
+    len_r1 = jnp.sum(r1_mask).astype(jnp.float32)
+    len_r2 = jnp.sum(r2_mask).astype(jnp.float32)
+    
+    # Calculate cancellation pairs (adjacent inverse pairs)
+    def count_cancellations(relator, mask):
+        # Get non-zero positions and their values
+        indices = jnp.where(mask, jnp.arange(MAX_RELATOR_LENGTH), -1)
+        # For each position i, check if r[i] and r[i+1] are inverses
+        # Shifted version (next element)
         shifted = jnp.roll(relator, -1)
-        # Only consider adjacent pairs within the actual relator
-        valid_pairs = is_nonzero & jnp.roll(is_nonzero, -1)
-        # Cancellation occurs when element * next_element == -1
-        cancellation_pairs = jnp.sum(
-            valid_pairs * jnp.abs(relator + shifted == 0).astype(jnp.float32)
-        )
-        
-        # Check for palindromic structure: relator equals its reverse (up to padding)
-        # Create a mask for valid positions
-        mask = jnp.arange(36) < length
-        reversed_relator = jnp.where(mask, relator[::-1], 0)
-        # Only compare non-padded positions
-        palindrome_score = jnp.sum(mask * (relator == reversed_relator).astype(jnp.float32))
-        
-        # Count repeated patterns of length 2 (potential simplification candidates)
-        # Extract all length-2 substrings
-        substrings = jnp.stack([relator[:-1], relator[1:]], axis=1)
-        # Only consider non-padded substrings
-        valid_substrings = (jnp.abs(substrings[:, 0]) > 0) & (jnp.abs(substrings[:, 1]) > 0)
-        # Count unique substrings and their repetitions
-        # Use a simplified count: number of repeated substrings
-        # For efficiency in JIT, compute a simple metric: count of duplicate adjacent pairs
-        unique_pairs = jnp.unique(substrings[valid_substrings], axis=0)
-        repetition_count = jnp.sum(valid_substrings.astype(jnp.float32)) - unique_pairs.shape[0]
-        
-        return length, cancellation_pairs, palindrome_score, repetition_count
+        # Check if consecutive elements are inverses (a and -a)
+        is_inverse = (relator + shifted == 0) & (relator != 0) & (shifted != 0)
+        # Mask out padding positions and the last position that wraps around
+        valid = mask & jnp.roll(mask, -1)
+        return jnp.sum(is_inverse & valid)
     
-    # Process both relators
-    r1_length, r1_cancellation, r1_palindrome, r1_repetition = process_relators(r1)
-    r2_length, r2_cancellation, r2_palindrome, r2_repetition = process_relators(r2)
+    cancels_r1 = count_cancellations(r1, r1_mask)
+    cancels_r2 = count_cancellations(r2, r2_mask)
     
-    # Aggregate metrics
-    total_length = r1_length + r2_length
-    total_cancellation = r1_cancellation + r2_cancellation
-    total_palindrome = r1_palindrome + r2_palindrome
-    total_repetition = r1_repetition + r2_repetition
+    # Count palindromic structure - how much of the relator reads the same forwards/backwards
+    def palindromic_score(relator, mask):
+        # Reverse the relator
+        reversed_rel = jnp.flip(relator)
+        # Check matching pairs, weighted by distance from center
+        matches = (relator == reversed_rel) & (relator != 0) & (reversed_rel != 0)
+        return jnp.sum(matches & mask) / (jnp.sum(mask) + 1e-6)
     
-    # Normalize length component (max 72)
-    length_score = 1.0 - (total_length / 72.0)
+    pal_score_r1 = palindromic_score(r1, r1_mask)
+    pal_score_r2 = palindromic_score(r2, r2_mask)
     
-    # Cancellation score: higher is better (more potential simplifications)
-    max_cancellation = total_length - 1 if total_length > 0 else 0
-    cancellation_score = total_cancellation / max(1.0, max_cancellation) if max_cancellation > 0 else 0.0
+    # Compute total cancellation potential and structural score
+    total_len = len_r1 + len_r2
+    total_cancels = cancels_r1 + cancels_r2
+    avg_pal = (pal_score_r1 + pal_score_r2) / 2.0
     
-    # Palindrome symmetry score (normalized by length)
-    max_palindrome = total_length
-    palindrome_score = total_palindrome / max(1.0, max_palindrome) if max_palindrome > 0 else 0.0
+    # Normalize to [0,1] with emphasis on cancellation and structure
+    # Cancellation potential contributes 0.4, palindrome score 0.4, and inverse length 0.2
+    cancellation_score = total_cancels / (total_len + 1e-6)
+    length_score = 1.0 - (total_len / MAX_PRESENTATION_LENGTH)
     
-    # Repetition score (potential for simplification)
-    max_repetition = total_length - 1 if total_length > 1 else 1
-    repetition_score = min(1.0, total_repetition / max(1.0, max_repetition))
+    # Combine components with weights tuned for exploration balance
+    score = 0.4 * cancellation_score + 0.4 * avg_pal + 0.2 * length_score
     
-    # Combine scores with weights reflecting their importance for trivialization
-    # Cancellation pairs are most critical for simplification
-    combined_score = (
-        0.4 * length_score + 
-        0.35 * cancellation_score + 
-        0.15 * palindrome_score + 
-        0.1 * repetition_score
-    )
-    
-    return jnp.clip(combined_score, 0.0, 1.0)
+    # Ensure bounded [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -111,100 +87,89 @@ def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
 ## Request 2
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v1`.
 
-**Latency:** 18.577 s
+**Latency:** 15.219 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
-def heuristic_fn_v1(presentation: jnp.ndarray) -> float:
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures structural properties indicating potential for
+    trivialization via AC moves. Focuses on:
+    1. Cancellation potential: pairs of adjacent inverse generators
+    2. Substring symmetry: detection of palindrome-like structures that may simplify
+    3. Length management: penalizes excessive presentation length but with diminishing returns
+    4. Generator diversity:鼓励 balanced representation of both generators
+    
+    Key modification: Uses normalized cancellation pairs count (scaled by max possible)
+    plus symmetry measure, with a weak penalty for total length to avoid getting stuck
+    in local maxima where length is artificially minimized.
     """
-    Improved heuristic that combines presentation length reduction with cancellation potential.
-    
-    Key modifications:
-    1. Counts cancellation pairs (adjacent inverse pairs like [1, -1] or [-2, 2])
-    2. Measures palindrome symmetry in relators (potential for cyclic reduction)
-    3. Incorporates a small penalty for very long relators to guide toward simplification
-    4. Normalizes to [0,1] range by combining these factors
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Extract relator 1 and 2 (first 36 and last 36 elements)
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    # Split presentation into two relators (first 36, next 36 entries)
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Mask for actual elements (non-padding)
-    mask1 = relator1 != 0
-    mask2 = relator2 != 0
-    
-    # Count actual elements in each relator
-    len1 = jnp.sum(mask1)
-    len2 = jnp.sum(mask2)
+    # Compute length of each relator (non-zero entries)
+    len1 = jnp.sum(r1 != 0)
+    len2 = jnp.sum(r2 != 0)
     total_length = len1 + len2
     
-    # Compute cancellation pairs (adjacent inverse pairs)
-    # For relator1: check pairs (i, i+1)
-    r1_shifted = jnp.roll(relator1, -1)
-    pairs1 = relator1 * r1_shifted
-    # Check for inverse pairs (product = -1: (1,-1) or (-1,1)) or (product = -4: (2,-2) or (-2,2))
-    # Note: For pairs to be inverses: a * b = -1 if a=1,b=-1; a=2,b=-2 gives a*b=-4; a=-1,b=1 gives -1; a=-2,b=2 gives -4
-    cancellation_pairs1 = ((pairs1 == -1) | (pairs1 == -4))[:-1] & mask1[:-1] & mask1[1:]
-    num_cancellation_pairs1 = jnp.sum(cancellation_pairs1)
+    # Normalize length term: better for smaller presentations
+    # Using sigmoid-like scaling to avoid extreme penalties for moderately long presentations
+    length_score = 1.0 / (1.0 + 0.02 * total_length)
     
-    # For relator2
-    r2_shifted = jnp.roll(relator2, -1)
-    pairs2 = relator2 * r2_shifted
-    cancellation_pairs2 = ((pairs2 == -1) | (pairs2 == -4))[:-1] & mask2[:-1] & mask2[1:]
-    num_cancellation_pairs2 = jnp.sum(cancellation_pairs2)
+    # Compute cancellation pairs within each relator
+    # Adjacent inverse pairs (e.g., [1, -1] or [2, -2])
+    def calc_cancellation_pairs(relator):
+        # Create shifted arrays: current and next positions
+        cur = relator[:-1]
+        next_pos = relator[1:]
+        
+        # Check for inverse pairs: a * b == -1 when b == -a (and a != 0, b != 0)
+        is_inverse_pair = (cur != 0) & (next_pos != 0) & (cur + next_pos == 0)
+        return jnp.sum(is_inverse_pair)
     
-    total_cancellation_pairs = num_cancellation_pairs1 + num_cancellation_pairs2
+    # Also check for palindrome patterns: relator == reverse(relator)
+    def palindrome_score(relator):
+        # Only consider non-zero prefix
+        length = jnp.sum(relator != 0)
+        if length == 0:
+            return 0.0
+        
+        # Create padded reverse for comparison
+        prefix = relator[:length]
+        rev_prefix = prefix[::-1]
+        
+        # Compare prefix with its reverse
+        matches = jnp.sum(prefix == rev_prefix)
+        return matches / length  # Normalized to [0,1]
     
-    # Compute symmetry/palindrome potential: check how close each relator is to being a palindrome
-    # For relator1: compare element i with element (len1 - 1 - i)
-    indices1 = jnp.arange(36)
-    rev_indices1 = jnp.where(mask1, 35 - indices1, 36)  # for padding positions, map to invalid index
-    rev_relator1 = jnp.where((rev_indices1 < 36) & mask1, relator1[rev_indices1], 0)
-    palindrome_match1 = (relator1 == rev_relator1) | (~mask1 & (rev_indices1 >= 36))
-    # Only consider non-padding elements
-    sym1 = jnp.where(mask1, palindrome_match1, False)
-    num_sym1 = jnp.sum(sym1) / len1 if len1 > 0 else 0.0
+    # Calculate scores
+    cancel1 = calc_cancellation_pairs(r1)
+    cancel2 = calc_cancellation_pairs(r2)
+    total_cancel = cancel1 + cancel2
     
-    # For relator2
-    rev_indices2 = jnp.where(mask2, 35 - indices1, 36)
-    rev_relator2 = jnp.where((rev_indices2 < 36) & mask2, relator2[rev_indices2], 0)
-    palindrome_match2 = (relator2 == rev_relator2) | (~mask2 & (rev_indices2 >= 36))
-    sym2 = jnp.where(mask2, palindrome_match2, False)
-    num_sym2 = jnp.sum(sym2) / len2 if len2 > 0 else 0.0
+    # Normalize cancellation by max possible (length - 1 per relator)
+    max_cancel = MAX_RELATOR_LENGTH - 1  # Upper bound per relator
+    cancel_score = jnp.minimum(total_cancel / (2 * max_cancel), 1.0)
     
-    avg_symmetry = (num_sym1 + num_sym2) / 2.0
+    # Palindrome symmetry score
+    pali1 = palindrome_score(r1)
+    pali2 = palindrome_score(r2)
+    symmetry_score = (pali1 + pali2) / 2.0
     
-    # Compute normalized score
-    # Normalize length term: shorter is better. Max possible length is 72, min is 2 (trivial case)
-    # Score: (1 - total_length/72) but with exponential weighting for very short lengths
-    length_score = jnp.exp(-total_length / 20.0)
+    # Combined score: weighted combination favoring cancellations and symmetry
+    # Give higher weight to cancellations as they directly enable AC moves
+    combined_score = 0.6 * cancel_score + 0.3 * symmetry_score + 0.1 * length_score
     
-    # Cancellation pair score: more pairs = easier to reduce
-    # Normalize by max possible pairs (max length-1 per relator => 35+35=70)
-    cancellation_score = total_cancellation_pairs / 70.0
-    
-    # Symmetry score: more palindrome-like = more likely to be reducible via cyclic permutations
-    symmetry_score = avg_symmetry
-    
-    # Combine with weights
-    final_score = 0.4 * length_score + 0.3 * cancellation_score + 0.3 * symmetry_score
-    
-    # Ensure bounded to [0,1]
-    return jnp.clip(final_score, 0.0, 1.0)
+    # Return in [0,1]
+    return jnp.clip(combined_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -213,97 +178,130 @@ def heuristic_fn_v1(presentation: jnp.ndarray) -> float:
 ## Request 3
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v2`.
 
-**Latency:** 29.236 s
+**Latency:** 37.317 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic that captures structural properties indicating potential for cancellation and closeness to triviality, rather than just using presentation length.
 
-def heuristic_fn_v2(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures structural properties useful for trivialisation:
-    1. Measures cancellation potential by counting adjacent inverse pairs (x, -x)
-    2. Counts symmetry patterns (palindromic structure) which often indicate reducible words
-    3. Penalizes long runs of the same generator (reduces flexibility for AC moves)
-    4. Encourages balanced generator counts (net cancellation within each relator)
-    5. Returns normalized score in [0,1] with higher values indicating better potential
+The key insight is that we need to detect patterns that suggest a presentation can be simplified, even if the current length is large. Important features include:
+1. **Cancellation potential**: Adjacent inverse pairs within relators
+2. **Symmetry**: Palindromic structure in relators
+3. **Subword repetition**: Repeated substrings that could be eliminated via conjugation
+4. **Balance**: Equal numbers of generators and inverses in each relator (necessary for trivial group)
+5. **Shared structure**: Similar substrings between relators
+
+Let me implement a heuristic that combines these features with appropriate weights.
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Heuristic focusing on structural properties indicating trivialisation potential:
+    - Balance of generators/inverses within each relator
+    - Cancellation potential (adjacent inverse pairs)
+    - Palindromic structure (suggests conjugacy potential)
+    - Subword symmetry and repetition
     
     Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+        presentation: Array representing current group presentation [r_1; r_2], shape (72,)
     
     Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
+        Scalar heuristic value in [0,1] (higher = better trivialisation potential)
     """
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    
     # Split into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Count non-zero elements (actual word length)
-    len1 = jnp.sum(relator1 != 0)
-    len2 = jnp.sum(relator2 != 0)
-    total_length = len1 + len2
+    # Count non-zero (actual generator) elements in each relator
+    r1_active = jnp.sum(jnp.abs(r1) > 0)
+    r2_active = jnp.sum(jnp.abs(r2) > 0)
     
-    # Helper to process a single relator
-    def relator_score(relator):
-        # Count adjacent inverse pairs (immediate cancellation candidates)
-        inv_pairs = jnp.sum((relator[:-1] * relator[1:] < 0) & (jnp.abs(relator[:-1]) == jnp.abs(relator[1:])))
+    # Compute balance score: how equal are generators and inverses in each relator
+    def compute_balance(relator):
+        # For each generator type, count positive vs negative occurrences
+        gen1_pos = jnp.sum(relator == 1)
+        gen1_neg = jnp.sum(relator == -1)
+        gen2_pos = jnp.sum(relator == 2)
+        gen2_neg = jnp.sum(relator == -2)
         
-        # Count symmetry (palindromic potential) - check if word matches its reverse
-        # We compute a rough symmetry score by comparing first/last, second/second-last, etc.
-        # Only consider up to first 18 elements for efficiency
-        max_check = jnp.minimum(18, jnp.sum(relator != 0) // 2)
-        indices = jnp.arange(max_check)
-        reversed_indices = 35 - indices
-        symmetry_score = jnp.sum(
-            (relator[indices] != 0) & 
-            (relator[reversed_indices] != 0) & 
-            (relator[indices] + relator[reversed_indices] == 0)
-        )
+        # Balance is maximized when pos == neg for each generator
+        balance_gen1 = 1.0 - jnp.abs(gen1_pos - gen1_neg) / (gen1_pos + gen1_neg + 1e-6)
+        balance_gen2 = 1.0 - jnp.abs(gen2_pos - gen2_neg) / (gen2_pos + gen2_neg + 1e-6)
+        return (balance_gen1 + balance_gen2) / 2.0
+    
+    balance1 = compute_balance(r1)
+    balance2 = compute_balance(r2)
+    avg_balance = (balance1 + balance2) / 2.0
+    
+    # Compute cancellation potential: count adjacent inverse pairs
+    def count_cancellations(relator):
+        # Check for adjacent inverse pairs: [x, -x]
+        shifted = jnp.roll(relator, 1)
+        inv_pairs = jnp.sum((relator * shifted) == -1)  # x * (-x) = -1
+        # Also check for self-inverse patterns that could lead to simplification
+        return inv_pairs
+    
+    canc1 = count_cancellations(r1)
+    canc2 = count_cancellations(r2)
+    total_canc = (canc1 + canc2)
+    
+    # Compute palindromic score for each relator
+    def compute_palindrome_score(relator):
+        # Only consider active part (non-zero elements)
+        active_mask = (relator != 0).astype(jnp.float32)
+        reversed_rel = jnp.flip(relator * active_mask)
         
-        # Count generator balance: how close to equal numbers of x and x^{-1}
-        ones = jnp.sum(relator == 1) + jnp.sum(relator == -1)
-        twos = jnp.sum(relator == 2) + jnp.sum(relator == -2)
-        ones_balance = jnp.minimum(jnp.sum(relator == 1), jnp.sum(relator == -1))
-        twos_balance = jnp.minimum(jnp.sum(relator == 2), jnp.sum(relator == -2))
-        balance = ones_balance + twos_balance
+        # Compare original with reversed (only where both have active elements)
+        match = jnp.sum((relator == reversed_rel) * active_mask)
+        total_active = jnp.sum(active_mask)
+        return match / (total_active + 1e-6)
+    
+    pal1 = compute_palindrome_score(r1)
+    pal2 = compute_palindrome_score(r2)
+    avg_pal = (pal1 + pal2) / 2.0
+    
+    # Compute shared structure score: similarity between relators
+    def compute_shared_similarity(rel1, rel2):
+        # Normalize relators for comparison (only non-zero elements)
+        active1 = (rel1 != 0).astype(jnp.float32)
+        active2 = (rel2 != 0).astype(jnp.float32)
         
-        # Penalty for long runs of same generator (reduces flexibility)
-        # Calculate run lengths using cumulative count of same consecutive elements
-        shifts = jnp.roll(relator, 1)
-        runs = jnp.sum((relator != 0) & (shifts != relator))
-        run_penalty = jnp.maximum(0, (jnp.sum(relator != 0) - runs) - 2)  # penalize runs longer than 2
-        
-        # Normalize components
-        norm_inv_pairs = jnp.minimum(inv_pairs / 10, 1.0)
-        norm_symmetry = jnp.minimum(symmetry_score / 10, 1.0)
-        norm_balance = balance / jnp.maximum(1, (ones + twos))
-        norm_run_penalty = jnp.maximum(0, 1.0 - run_penalty / 20.0)
-        
-        return (norm_inv_pairs + norm_symmetry + norm_balance + norm_run_penalty) / 4.0
+        # Count common generator values (positive and negative)
+        common_gen = jnp.sum((jnp.abs(rel1) == jnp.abs(rel2)) * active1 * active2)
+        total_active = jnp.maximum(jnp.sum(active1), jnp.sum(active2))
+        return common_gen / (total_active + 1e-6)
     
-    # Calculate scores for each relator and combine
-    score1 = relator_score(relator1)
-    score2 = relator_score(relator2)
+    shared = compute_shared_similarity(r1, r2)
     
-    # Combine relator scores and consider total length (prefer shorter presentations)
-    relator_avg = (score1 + score2) / 2.0
+    # Normalize presentation length factor (shorter is better, but not decisive)
+    total_active = r1_active + r2_active
+    max_possible = 2 * MAX_RELATOR_LENGTH
+    length_norm = 1.0 - total_active / max_possible  # 1 for minimal, 0 for max length
     
-    # Length bonus: shorter is generally better but not absolute (per AC conjecture challenges)
-    length_bonus = jnp.maximum(0, 1.0 - total_length / 72.0)
+    # Combine scores with weights - balance is most important, then cancellation potential
+    # Length normalization has diminishing returns for large presentations
+    weights = jnp.array([0.35, 0.25, 0.20, 0.10, 0.10])  # [balance, cancellations, palindrome, shared, length]
+    features = jnp.array([avg_balance, total_canc / 4.0, avg_pal, shared, length_norm])
     
-    # Combine components: emphasize structural properties but consider length
-    # Use geometric mean to avoid bias toward either component
-    combined = jnp.sqrt(relator_avg * length_bonus)
+    # Clip to [0,1] range and return weighted sum
+    score = jnp.clip(jnp.sum(weights * features), 0.0, 1.0)
     
-    # Normalize to [0,1] with slight scaling for better separation
-    final_score = jnp.clip(combined * 1.5, 0.0, 1.0)
-    
-    return final_score
+    return score
+# [EVOLVE-BLOCK-END]
 ```
+
+Key improvements over a simple length-based heuristic:
+1. **Balance scoring** - Checks if each relator has equal numbers of generators and their inverses, which is necessary for triviality
+2. **Cancellation potential** - Counts adjacent inverse pairs that could be eliminated via conjugation moves
+3. **Palindromic structure** - Detects relators that are palindromes, suggesting potential for conjugacy-based simplification
+4. **Shared structure** - Measures similarity between relators, indicating potential for AC1 moves (concatenation)
+5. **Length normalization** - Still considers length but as a secondary factor with diminishing returns
+
+The weighting scheme prioritizes structural balance and cancellation potential, which are more indicative of trivialisation potential than length alone.
 
 
 ---
@@ -311,82 +309,119 @@ def heuristic_fn_v2(presentation: jnp.ndarray) -> float:
 ## Request 4
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v3`.
 
-**Latency:** 12.569 s
+**Latency:** 23.773 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v3(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic focusing on cancellation potential and structural simplicity.
-    - Prioritizes reducing presentation length (primary)
-    - Encourages symmetry (palindromic relators often cancel easily)
-    - Rewards relator structure with alternating generator/inverse patterns
-    - Penalizes long runs of same generator (harder to cancel)
+    r"""
+    Enhanced heuristic that combines multiple structural features to better detect
+    potential for cancellation and progression toward triviality.
     
-    This heuristic addresses the problem that naive length-based heuristics fail to 
-    recognize presentations that may temporarily grow during trivialization but have 
-    high structural potential for cancellation.
+    Key improvements over v0:
+    1. Counts cancellation pairs (adjacent inverse pairs like [1, -1])
+    2. Detects palindromic structure in relators (common in trivial group presentations)
+    3. Measures imbalance between relator lengths (favors balanced presentations)
+    4. Penalizes complex repeated patterns that indicate non-trivial structure
+    5. Combines features into a weighted score with sigmoid normalization
+    
+    These features help identify presentations that may require expansion before
+    contraction, and detect hidden structure even in long intermediate presentations.
     """
+    # Constants
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Separate the two relators
+    # Extract relators (first 36 elements = r1, last 36 = r2)
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Get effective lengths (non-zero entries)
-    is_r1_active = jnp.abs(r1) > 0
-    is_r2_active = jnp.abs(r2) > 0
-    len_r1 = jnp.sum(is_r1_active)
-    len_r2 = jnp.sum(is_r2_active)
-    total_length = len_r1 + len_r2
+    # Helper functions
+    def get_active_length(relator):
+        """Count non-zero elements in relator"""
+        return jnp.sum(jnp.abs(relator) > 0)
     
-    # Normalize length component to [0,1] with good coverage
-    # Inverse relationship: shorter is better, cap at 72 (max possible)
-    length_score = 1.0 - jnp.minimum(total_length, 72) / 72.0
+    def count_cancellation_pairs(relator):
+        """Count adjacent inverse pairs (like [1, -1] or [-2, 2])"""
+        # Shifted versions to compare adjacent elements
+        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
+        # Check if adjacent pairs are inverses: a * b == -1 (in terms of absolute values)
+        abs_pairs = jnp.abs(relator) * jnp.abs(shifted)
+        sign_products = jnp.sign(relator) * jnp.sign(shifted)
+        return jnp.sum((abs_pairs > 0) & (sign_products == -1))
     
-    # Symmetry score: count matching positions between r1 and reversed r1, r2 and reversed r2
-    # Palindromic structure often indicates high cancellation potential
-    rev_r1 = jnp.flip(r1)
-    rev_r2 = jnp.flip(r2)
+    def count_palindromic_matches(relator):
+        """Count matching elements from start and end moving inward"""
+        active_len = get_active_length(relator)
+        # Only consider active part for palindrome detection
+        active_relator = relator[:active_len]
+        # Compare i-th element from start with i-th from end
+        if active_len == 0:
+            return 0.0
+        reversed_active = active_relator[::-1]
+        matches = jnp.sum(active_relator == reversed_active)
+        return matches / active_len  # Normalize by length
     
-    # Only count active positions for symmetry
-    sym_r1 = jnp.sum((r1 == rev_r1) * is_r1_active)
-    sym_r2 = jnp.sum((r2 == rev_r2) * is_r2_active)
-    max_sym = jnp.maximum(len_r1, len_r2)
-    symmetry_score = (sym_r1 + sym_r2) / jnp.maximum(max_sym * 2, 1)
+    def count_repeated_patterns(relator):
+        """Count repeated substrings of length 2 (simpler pattern detection)"""
+        # Get all length-2 substrings
+        substrings = jnp.stack([relator[:-1], relator[1:]], axis=1)
+        # Only consider active substrings (no zeros)
+        active_mask = jnp.all(jnp.abs(substrings) > 0, axis=1)
+        active_substrings = substrings[active_mask]
+        # Count unique substrings
+        if active_substrings.size == 0:
+            return 0.0
+        # Flatten and convert to hashable-ish representation
+        pattern_ids = jnp.abs(active_substrings[:, 0]) * 3 + jnp.sign(active_substrings[:, 0]) * jnp.abs(active_substrings[:, 1])
+        unique_patterns = jnp.unique(pattern_ids)
+        return jnp.sum(pattern_ids[:, None] == unique_patterns[None, :], axis=0).max()
     
-    # Pattern score: reward alternating patterns (generator then inverse, etc.)
-    # Detect adjacent positions where abs(r[i]) == abs(r[i+1]) but signs differ (potential cancellation)
-    def cancellation_pairs(relator, mask):
-        # Pad with zeros to avoid edge effects
-        padded = jnp.concatenate([jnp.array([0]), relator, jnp.array([0])])
-        # Compare adjacent pairs (shift by 1)
-        pair1 = padded[:-2]  # current
-        pair2 = padded[2:]   # two positions ahead (to check for patterns with gap)
-        pair2_adj = padded[1:-1]  # adjacent
-        # Count positions where abs same but sign differs (potential cancellation)
-        same_gen = jnp.abs(pair1) == jnp.abs(pair2_adj)
-        opposite_sign = pair1 * pair2_adj < 0
-        pairs = same_gen * opposite_sign
-        # Only count within active region
-        active_mask = mask[:-1] * mask[1:]  # both adjacent positions active
-        return jnp.sum(pairs * active_mask)
+    # Calculate features for each relator
+    len_r1 = get_active_length(r1)
+    len_r2 = get_active_length(r2)
+    total_len = len_r1 + len_r2
     
-    cancel_r1 = cancellation_pairs(r1, is_r1_active)
-    cancel_r2 = cancellation_pairs(r2, is_r2_active)
-    max_cancel = jnp.maximum(len_r1, len_r2)  # upper bound on possible cancellable pairs
-    cancel_score = (cancel_r1 + cancel_r2) / jnp.maximum(max_cancel, 1)
+    # Features
+    cancel_r1 = count_cancellation_pairs(r1)
+    cancel_r2 = count_cancellation_pairs(r2)
+    cancel_total = cancel_r1 + cancel_r2
     
-    # Combined score with weights
-    # Length is most important, then cancellation potential, then symmetry
-    combined = 0.6 * length_score + 0.3 * cancel_score + 0.1 * symmetry_score
+    palin_r1 = count_palindromic_matches(r1)
+    palin_r2 = count_palindromic_matches(r2)
+    palin_total = (palin_r1 + palin_r2) / 2.0  # Average palindrome score
     
-    # Ensure bounded to [0,1]
-    return jnp.clip(combined, 0.0, 1.0)
+    pattern_complexity_r1 = count_repeated_patterns(r1)
+    pattern_complexity_r2 = count_repeated_patterns(r2)
+    pattern_avg = (pattern_complexity_r1 + pattern_complexity_r2) / 2.0
+    
+    # Length ratio (favor balanced lengths)
+    length_imbalance = jnp.abs(len_r1 - len_r2) / (jnp.maximum(len_r1, len_r2) + 1e-6)
+    
+    # Normalized presentation length (0=minimum, 1=maximum)
+    norm_length = total_len / MAX_PRESENTATION_LENGTH
+    
+    # Combine features into final score with reasonable weights
+    # Higher weight on cancellation potential (indicates immediate simplification possible)
+    # Lower weight on palindrome detection (indicates potential symmetry)
+    # Penalty for length and pattern complexity (complexity often indicates non-triviality)
+    
+    base_score = (
+        0.35 * (1 - norm_length) +  # Length component (0 to 1)
+        0.30 * (cancel_total / MAX_RELATOR_LENGTH) +  # Cancellation potential
+        0.20 * palin_total +  # Palindromic structure
+        0.10 * (1 - length_imbalance) -  # Length balance
+        0.10 * (jnp.log(pattern_avg + 1e-6) / jnp.log(10))  # Pattern complexity penalty
+    )
+    
+    # Sigmoid normalization to [0, 1]
+    # Map reasonable range [-2, 2] to [0, 1]
+    score = 1 / (1 + jnp.exp(-5 * (base_score + 0.5)))
+    return score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -395,103 +430,110 @@ def heuristic_fn_v3(presentation: jnp.ndarray) -> float:
 ## Request 5
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v4`.
 
-**Latency:** 28.957 s
+**Latency:** 20.651 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a heuristic that goes beyond simple length minimization. The key challenges are:
 
-def heuristic_fn_v4(presentation: jnp.ndarray) -> float:
+1. Intermediate steps may need to increase length to enable future cancellations
+2. The heuristic should detect "cancellation potential" - patterns that suggest the relators can be transformed to trivial forms
+3. Need to identify structural properties like:
+   - Self-cancellation patterns (palindromes with inverses)
+   - Common substrings between relators that could be eliminated via conjugation
+   - Balanced generator/inverse counts (each relator should ideally have equal counts of generators and their inverses for triviality)
+
+My approach for `heuristic_fn_v4`:
+1. Continue to track presentation length (shorter is generally better)
+2. Add measures for:
+   - "Cancellation pairs" within each relator (adjacent generator+inverse pairs)
+   - Balance of generators vs inverses in each relator
+   - Potential for cancellation via substring matching between relators
+3. Use these to create a bounded [0,1] score
+
+Here's the improved heuristic:
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures cancellation potential beyond simple length.
+    
+    Key improvements over baseline:
+    - Counts adjacent cancellation pairs (x, x^-1) within relators
+    - Measures generator/inverse balance in each relator (should be balanced for trivial group)
+    - Penalizes unbalanced generator counts across the presentation
+    
+    Args:
+        presentation: Array representing current group presentation [r_1; r_2]. Shape (72,) int32.
+            0 is padding, 1/-1 for x1, 2/-2 for x2.
+    
+    Returns:
+        Scalar heuristic in [0,1] (higher = better potential for trivialization).
     """
-    Enhanced heuristic that captures structural properties conducive to trivialisation.
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    Key components:
-    1. Reward cancellation potential: count matching generator-inverse pairs across relators
-    2. Reward palindromic structure (common in trivial presentations)
-    3. Reward symmetry between relators (common in AC move sequences toward triviality)
-    4. Moderate penalty for extreme length (but not as severe as naive length-based heuristics)
+    # Split presentation into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    This balances immediate structure with the potential for future cancellation.
-    """
-    # Split presentation into two relators (each up to length 36)
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    # Create mask for non-padding positions
+    def get_valid_mask(relator):
+        return jnp.abs(relator) > 0
     
-    # Get non-padding masks
-    mask1 = r1 != 0
-    mask2 = r2 != 0
+    mask1 = get_valid_mask(r1)
+    mask2 = get_valid_mask(r2)
     
-    # Normalize by length for fair comparison
+    # Count lengths
     len1 = jnp.sum(mask1)
     len2 = jnp.sum(mask2)
+    
+    # Basic length normalization (shorter is generally better, but not absolute)
     total_len = len1 + len2
+    length_score = 1.0 - jnp.clip(total_len / MAX_PRESENTATION_LENGTH, 0.0, 1.0)
     
-    # 1. Cancellation potential: count where r1[i] == -r2[j] (potential cancellations)
-    # We compute this efficiently by using outer comparisons
-    # For each position in r1, count matching inverse in r2
-    r1_expanded = r1[:, jnp.newaxis]  # shape (36,1)
-    r2_expanded = r2[jnp.newaxis, :]  # shape (1,36)
-    inv_match = (r1_expanded == -r2_expanded) & (r1_expanded != 0) & (r2_expanded != 0)
-    cancellation_potential = jnp.sum(inv_match)
-    
-    # 2. Palindromic structure: count positions where r[i] == -r[len-1-i] (reversed complement)
-    def palindromic_score(relator, mask):
-        rev = jnp.flip(relator)
-        # Only compare non-padding positions
-        rev_mask = jnp.flip(mask)
-        valid_mask = mask & rev_mask
-        
-        # Compare each position with its reversal (generator vs inverse of reversed position)
-        comp = relator == -rev
-        score = jnp.sum(comp & valid_mask)
-        # Normalize by number of valid positions
-        n_valid = jnp.sum(valid_mask)
-        return jnp.where(n_valid > 0, score / n_valid, 0.0)
-    
-    pal1 = palindromic_score(r1, mask1)
-    pal2 = palindromic_score(r2, mask2)
-    avg_pal = (pal1 + pal2) / 2.0
-    
-    # 3. Symmetry between relators: correlation of patterns
-    # Compute autocorrelation-based features: similarity of adjacent elements
-    def adjacency_sim(relator, mask):
-        # Shift relator by 1 and compare
+    # Count cancellation pairs (adjacent x, x^-1) within each relator
+    def count_cancellation_pairs(relator, mask):
+        # Shifted versions to compare adjacent elements
         shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        mask_shifted = jnp.concatenate([mask[1:], jnp.array([False])])
-        valid = mask & mask_shifted
-        same_sign = (relator == shifted) & valid
-        return jnp.sum(same_sign) / jnp.maximum(jnp.sum(valid), 1.0)
+        # Check if adjacent pairs are inverses: a + b == 0 where a,b != 0
+        is_inverse = (relator + shifted == 0) & (mask & jnp.concatenate([mask[1:], jnp.array([False])]))
+        return jnp.sum(is_inverse)
     
-    adj_sim1 = adjacency_sim(r1, mask1)
-    adj_sim2 = adjacency_sim(r2, mask2)
-    rel_sim = jnp.abs(adj_sim1 - adj_sim2)
-    symmetry_score = 1.0 - rel_sim  # higher when similar
+    cancel1 = count_cancellation_pairs(r1, mask1)
+    cancel2 = count_cancellation_pairs(r2, mask2)
     
-    # 4. Penalty for length (but with soft thresholding)
-    # Normalize total length by ideal (2) and apply soft penalty
-    ideal_len = 2.0
-    len_ratio = total_len / ideal_len
-    # Smooth penalty: 1 - tanh(len_ratio - 1)
-    length_penalty = 1.0 - jnp.tanh(len_ratio - 1.0)
+    # Cancellation pair score (reward for adjacent inverse pairs)
+    cancel_score = (cancel1 + cancel2) / MAX_RELATOR_LENGTH
     
-    # Combine components with weights
-    w_cancel = 0.35
-    w_pal = 0.25
-    w_sym = 0.25
-    w_len = 0.15
+    # Generator balance score: each relator should have balanced counts of each generator type
+    def generator_balance(relator, mask):
+        # For each generator type (1,2), count positive vs negative
+        balance = 0.0
+        for gen in [1, 2]:
+            pos_count = jnp.sum((relator == gen) & mask)
+            neg_count = jnp.sum((relator == -gen) & mask)
+            # Perfect balance is ideal; maximum imbalance is length of relator
+            total = pos_count + neg_count
+            # Add 1 to avoid division by zero, normalize
+            if total > 0:
+                balance += 1.0 - jnp.abs(pos_count - neg_count) / total
+            else:
+                balance += 1.0  # No occurrences = perfectly balanced
+        return balance / 2.0
     
-    # Normalize components to [0,1] range and combine
-    normalized_score = (
-        w_cancel * (cancellation_potential / jnp.maximum(total_len, 1.0)) +
-        w_pal * avg_pal +
-        w_sym * symmetry_score +
-        w_len * length_penalty
-    )
+    balance1 = generator_balance(r1, mask1)
+    balance2 = generator_balance(r2, mask2)
+    balance_score = (balance1 + balance2) / 2.0
     
-    # Clamp to [0,1] as required
-    return jnp.clip(normalized_score, 0.0, 1.0)
+    # Combined score with weights emphasizing cancellation and balance over pure length
+    # This reflects the insight that intermediate steps may be longer but have better structure
+    total_score = 0.3 * length_score + 0.35 * cancel_score + 0.35 * balance_score
+    
+    return jnp.clip(total_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -500,93 +542,108 @@ def heuristic_fn_v4(presentation: jnp.ndarray) -> float:
 ## Request 6
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v5`.
 
-**Latency:** 13.983 s
+**Latency:** 21.808 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v5(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures structural potential for trivialisation by:
+    1. Prioritising reduced presentations (cancellation pairs)
+    2. Penalising long non-cancelling segments
+    3. Detecting palindromic/rotationally symmetric relators (signs of potential reducibility)
+    4. Rewarding balance between relators (similar lengths suggest symmetry)
+    5. Using a smooth sigmoid scaling to bound output in [0,1]
+    
+    These features better capture "hidden structure" even in long intermediate presentations
+    that may be part of a valid trivialisation path.
     """
-    Enhanced heuristic that combines:
-    1. Inverse cancellation potential (counting adjacent inverse pairs)
-    2. Palindromic structure detection (symmetric patterns often indicate simplifiability)
-    3. Length normalization (preferring shorter presentations)
-    4. Balancedness between the two relators
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    This heuristic better captures structural properties that may indicate potential for
-    simplification via AC moves, even when the current length is large.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
     # Split presentation into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper to compute cancellation pairs for a single relator
-    def count_inverse_pairs(relator):
-        # Check for consecutive inverse pairs: [a, -a] or [-a, a]
-        shift_left = jnp.roll(relator, -1)
-        # Check adjacent pairs (excluding padding)
-        non_padding_mask = (relator != 0) & (shift_left != 0)
-        # Inverse pairs condition: a + b == 0 and both non-zero
-        inverse_pairs = (relator + shift_left == 0) & non_padding_mask
-        return jnp.sum(inverse_pairs)
+    # Helper to compute reduction: count adjacent cancellation pairs
+    def count_cancellations(relator):
+        # For positions i and i+1, check if they are inverses
+        pair_product = relator[:-1] * relator[1:]
+        # Inverses multiply to -1 or -4 (1*-1=-1, 2*-2=-4)
+        cancellation_pairs = (pair_product == -1) | (pair_product == -4)
+        return jnp.sum(cancellation_pairs)
     
-    # Helper to compute palindromic score: count matching symmetric pairs
-    def palindromic_score(relator):
-        # Pad to exactly 36 (though already padded in the input)
-        relator_trimmed = relator
+    r1_cancels = count_cancellations(r1)
+    r2_cancels = count_cancellations(r2)
+    
+    # Total effective cancellations (upper bound on reducible length)
+    total_cancellations = r1_cancels + r2_cancels
+    
+    # Compute actual lengths (non-zero elements)
+    def count_nonzero(relator):
+        return jnp.sum(relator != 0)
+    
+    len_r1 = count_nonzero(r1)
+    len_r2 = count_nonzero(r2)
+    total_length = len_r1 + len_r2
+    
+    # Estimate of reducible length (upper bound)
+    reducible_length = total_cancellations
+    
+    # Penalty for long presentations relative to reducible potential
+    # Using log to smooth growth
+    length_penalty = jnp.log1p(total_length) / jnp.log1p(MAX_PRESENTATION_LENGTH)
+    
+    # Reward for reducible potential (ratio of cancellations to length)
+    potential_ratio = reducible_length / jnp.maximum(total_length, 1.0)
+    
+    # Palindrome detection: check if relator reads same forwards and backwards (with inverse)
+    def palindrome_score(relator):
+        # Find first and last non-zero indices
+        indices = jnp.arange(MAX_RELATOR_LENGTH)
+        non_zero_mask = relator != 0
+        first_idx = jnp.argmax(non_zero_mask * indices) if jnp.any(non_zero_mask) else 0
+        last_idx = jnp.argmax(non_zero_mask[::-1] * (MAX_RELATOR_LENGTH - 1 - indices)) if jnp.any(non_zero_mask) else MAX_RELATOR_LENGTH - 1
         
-        # Count how many positions match their symmetric counterparts
-        reversed_relator = jnp.flip(relator_trimmed)
-        non_padding_mask = (relator_trimmed != 0) & (reversed_relator != 0)
-        matching_pairs = (relator_trimmed == reversed_relator) & non_padding_mask
-        return jnp.sum(matching_pairs)
+        # Extract active segment
+        active_length = last_idx - first_idx + 1
+        segment = relator[first_idx:first_idx + active_length]
+        
+        # Check for palindrome with inverse (relator[i] == -relator[-i-1])
+        reversed_segment = segment[::-1]
+        inverse_segment = -reversed_segment
+        matches = segment == inverse_segment
+        return jnp.mean(matches.astype(jnp.float32)) if active_length > 0 else 0.0
     
-    # Compute components for both relators
-    inverse_pairs_1 = count_inverse_pairs(relator1)
-    inverse_pairs_2 = count_inverse_pairs(relator2)
-    palindromic_1 = palindromic_score(relator1)
-    palindromic_2 = palindromic_score(relator2)
+    pal1 = palindrome_score(r1)
+    pal2 = palindrome_score(r2)
+    avg_palindrome = (pal1 + pal2) / 2.0
     
-    # Total cancellation potential (adjacent inverses)
-    total_inverse_potential = inverse_pairs_1 + inverse_pairs_2
+    # Balance penalty: difference in lengths normalized
+    length_balance = 1.0 - jnp.abs(len_r1 - len_r2) / jnp.maximum(jnp.maximum(len_r1, len_r2), 1.0)
     
-    # Total palindromic symmetry
-    total_palindromic = palindromic_1 + palindromic_2
+    # Combine features with learned weights (heuristic constants)
+    c1, c2, c3, c4 = 0.4, 0.3, 0.2, 0.1  # weights for each component
     
-    # Length components: compute actual lengths (non-zero entries)
-    len1 = jnp.sum(relator1 != 0)
-    len2 = jnp.sum(relator2 != 0)
-    total_length = len1 + len2
+    # Base score from reducibility potential and length penalty
+    base_score = c1 * potential_ratio + c2 * (1.0 - length_penalty)
     
-    # Balancedness term: prefer equal lengths between relators
-    length_diff = jnp.abs(len1 - len2)
+    # Add bonus for structural symmetry features
+    structural_bonus = c3 * avg_palindrome + c4 * length_balance
     
-    # Normalize features and combine
-    # Cancellation pairs (max ~72 possible, but realistically much lower)
-    inv_term = jnp.clip(total_inverse_potential / 36.0, 0.0, 1.0)
-    # Palindromic symmetry (max 36 per relator -> 72 total)
-    pal_term = jnp.clip(total_palindromic / 72.0, 0.0, 1.0)
-    # Length component: shorter is better (max length 72)
-    len_term = jnp.clip(1.0 - total_length / 72.0, 0.0, 1.0)
-    # Balancedness: prefer balanced lengths (max diff 36)
-    bal_term = jnp.clip(1.0 - length_diff / 36.0, 0.0, 1.0)
+    # Final score: combination with smooth sigmoid normalization
+    raw_score = base_score + structural_bonus
+    # Clamp and scale to [0,1]
+    normalized_score = jnp.clip(raw_score, 0.0, 1.0)
     
-    # Weighted combination
-    # Emphasize cancellation and symmetry as strong indicators of simplifiability
-    score = 0.4 * inv_term + 0.3 * pal_term + 0.2 * len_term + 0.1 * bal_term
-    
-    return score
+    # Special bonus for presentations that are already trivial (two relators of length 0 or 2 with x1 and x2)
+    # Check if presentation is trivial: two relators each of length 1 with values 1 and 2
+    is_trivial = (len_r1 <= 1) & (len_r2 <= 1) & (total_length <= 2)
+    return jnp.where(is_trivial, 1.0, normalized_score)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -595,27 +652,30 @@ def heuristic_fn_v5(presentation: jnp.ndarray) -> float:
 ## Request 7
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v6`.
 
-**Latency:** 30.500 s
+**Latency:** 20.461 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic that can detect "structure" or "potential for cancellation" even in long presentations. The key insight is that intermediate states might have long relators but still be on a path to trivialization, so we need measures beyond just length.
 
-def heuristic_fn_v6(presentation: jnp.ndarray) -> float:
-    """
-    Improved heuristic focusing on cancellation potential and structure.
-    
-    Key components:
-    1. Primary: Count of reducible pairs (adjacent generator-inverse pairs) in both relators
-    2. Secondary: Detect palindromic structure (symmetry aids cancellation)
-    3. Tertiary: Balance of generator counts (avoid heavy imbalance)
-    4. Normalized to [0,1] range using sigmoid-like transformation
-    
-    This heuristic better identifies presentations with high trivialization potential,
-    even when they have long relators but structured patterns that enable efficient
-    cancellation during AC moves.
+Let me analyze what makes a presentation "closer to trivial":
+1. Shorter total length is good (but not the only factor)
+2. More opportunities for cancellation (like adjacent inverse pairs)
+3. Palindromic or symmetric structure
+4. Repeated patterns that might simplify via AC moves
+5. Relators that are close to being powers of generators
+
+I'll create `heuristic_fn_v6` that combines multiple signals with careful weighting:
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that combines multiple signals for detecting trivialization potential:
+    1. Normalized presentation length (shorter is better)
+    2. Cancellation potential (adjacent inverse pairs and palindromic structure)
+    3. Relator structure analysis (repetitions, symmetry)
+    4. Balance between relators (similar lengths often indicates progress)
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -625,83 +685,77 @@ def heuristic_fn_v6(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # Split into two relators (36 elements each)
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
     
-    # Get non-padding elements
-    def trim_relator(relator):
-        non_zero_mask = relator != 0
-        return relator * non_zero_mask, jnp.sum(non_zero_mask)
+    # Split presentation into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    r1_trimmed, len1 = trim_relator(r1)
-    r2_trimmed, len2 = jax.lax.cond(len1 > len2, lambda: (r1_trimmed, len1), lambda: (r2_trimmed, len2))
+    # Create masks for non-padding positions
+    mask1 = r1 != 0
+    mask2 = r2 != 0
     
-    # Helper to count reducible pairs (adjacent generator-inverse pairs)
-    def count_reducible_pairs(relator, length):
-        # Create shifted arrays (forward and backward)
-        shifted_fwd = jnp.concatenate([relator[1:], jnp.zeros((1,), dtype=jnp.int32)])
-        shifted_bwd = jnp.concatenate([jnp.zeros((1,), dtype=jnp.int32), relator[:-1]])
+    # Calculate actual lengths
+    len1 = jnp.sum(mask1)
+    len2 = jnp.sum(mask2)
+    total_len = len1 + len2
+    max_total_len = 2 * MAX_RELATOR_LENGTH
+    
+    # Normalized length score (shorter is better, capped at 0.8)
+    length_score = jnp.maximum(0.0, 1.0 - total_len / max_total_len * 0.8)
+    
+    # Cancellation potential: count adjacent inverse pairs within each relator
+    def count_inverses(relator, mask):
+        # Get absolute values for inverse detection
+        abs_rel = jnp.abs(relator)
         
-        # Check for pairs that multiply to identity (a * a^{-1} = 1)
-        pairs_fwd = relator * shifted_fwd == -1
-        pairs_bwd = relator * shifted_bwd == -1
-        
-        # Only count pairs within the actual length
-        indices = jnp.arange(36)
-        valid_fwd = (indices < length - 1) & pairs_fwd
-        valid_bwd = (indices > 0) & (indices <= length) & pairs_bwd
-        
-        return jnp.sum(valid_fwd) + jnp.sum(valid_bwd)
+        # Check for inverse pairs at positions i and i+1
+        shift_forward = jnp.roll(relator, -1)
+        # For last position, wrap to first (periodic boundary for structure detection)
+        # But ensure we only compare non-padding positions
+        valid_pairs = mask & jnp.roll(mask, -1)
+        inverse_pairs = (relator + shift_forward == 0) & valid_pairs
+        return jnp.sum(inverse_pairs)
     
-    # Count reducible pairs in each relator
-    pairs1 = count_reducible_pairs(r1, jnp.sum((presentation[:36] != 0).astype(jnp.int32)))
-    pairs2 = count_reducible_pairs(r2, jnp.sum((presentation[36:] != 0).astype(jnp.int32)))
-    total_pairs = pairs1 + pairs2
+    inv1 = count_inverses(r1, mask1)
+    inv2 = count_inverses(r2, mask2)
     
-    # Palindrome score: compare relator with its reverse
-    def palindrome_score(relator, length):
-        reversed_relator = jnp.flip(relator)
-        non_zero_mask = relator != 0
-        rev_non_zero_mask = reversed_relator != 0
-        
-        # Only compare positions that are non-zero in original and reversed
-        valid = non_zero_mask & rev_non_zero_mask
-        match = (relator == reversed_relator) & valid
-        
-        # Normalize by number of non-zero elements
-        total_non_zero = jnp.sum(non_zero_mask)
-        return jnp.sum(match) / jnp.maximum(total_non_zero, 1.0)
+    # Palindromic symmetry score: count matching positions from ends
+    def palindromic_score(relator, mask):
+        # Reverse the relator (with masking consideration)
+        reversed_r = jnp.where(mask, relator, 0)[::-1]
+        # Count matching non-zero positions
+        matches = (relator == reversed_r) & mask
+        return jnp.sum(matches)
     
-    pal1 = palindrome_score(r1, jnp.sum((presentation[:36] != 0).astype(jnp.int32)))
-    pal2 = palindrome_score(r2, jnp.sum((presentation[36:] != 0).astype(jnp.int32)))
-    avg_pal = (pal1 + pal2) / 2.0
+    pal1 = palindromic_score(r1, mask1)
+    pal2 = palindromic_score(r2, mask2)
     
-    # Generator balance: difference in counts between x1 and x2
-    def count_generator(relator, gen):
-        return jnp.sum(relator == gen) + jnp.sum(relator == -gen)
+    # Symmetry score (normalized by length)
+    avg_len = (len1 + len2) / 2 + 1e-6
+    symmetry_score = (pal1 + pal2) / (2 * avg_len)
     
-    # Count generators in each relator
-    gen1_r1 = count_generator(r1, 1)
-    gen2_r1 = count_generator(r1, 2)
-    gen1_r2 = count_generator(r2, 1)
-    gen2_r2 = count_generator(r2, 2)
+    # Balance between relator lengths (prefer similar lengths)
+    length_balance = 1.0 - jnp.abs(len1 - len2) / (max_total_len / 2 + 1e-6)
     
-    total_gen1 = gen1_r1 + gen1_r2
-    total_gen2 = gen2_r1 + gen2_r2
-    balance = 1.0 - jnp.abs(total_gen1 - total_gen2) / jnp.maximum(total_gen1 + total_gen2, 1.0)
+    # Generators used (prefer using fewer distinct generators effectively)
+    used_gens = jnp.sum((jnp.abs(r1) > 0) | (jnp.abs(r2) > 0))
+    gen_score = 1.0 - used_gens / (2 * max_total_len)
     
-    # Combine features with weights (heuristic tuned for structure detection)
-    # Normalize to [0,1] by scaling components
-    pair_score = jnp.minimum(total_pairs / 8.0, 1.0)  # Cap at 8 pairs max
-    pal_score = avg_pal
-    balance_score = balance
+    # Combined heuristic with reasonable weights
+    # Emphasize cancellation potential and symmetry as these are key for AC moves
+    score = (
+        0.3 * length_score +
+        0.25 * symmetry_score +
+        0.2 * length_balance +
+        0.15 * (inv1 + inv2) / (avg_len + 1) +
+        0.1 * gen_score
+    )
     
-    # Weighted combination
-    score = 0.4 * pair_score + 0.35 * pal_score + 0.25 * balance_score
-    
-    # Convert to [0,1] range with sigmoid-like smoothing
-    return jax.nn.sigmoid(score * 2.0)
+    # Ensure bounded to [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -710,122 +764,106 @@ def heuristic_fn_v6(presentation: jnp.ndarray) -> float:
 ## Request 8
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v7`.
 
-**Latency:** 31.325 s
+**Latency:** 20.287 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v7(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic that captures structural properties for trivialisation potential:
+    1. Penalizes long presentations (baseline)
+    2. Rewards high cancellation potential: counts matching adjacent generator-inverse pairs
+    3. Detects palindromic structure in relators (common in trivial group presentations)
+    4. Rewards presence of trivial subwords (x x^{-1} patterns)
+    5. Encourages symmetry between relators
+    
+    The heuristic uses a weighted combination that balances length with structural
+    indicators of reducibility, helping navigate through intermediate states that
+    temporarily increase length but enable later cancellation.
     """
-    Enhanced heuristic that captures structural properties indicating potential for cancellation.
-    Key components:
-    1. Minimizes total length (primary goal)
-    2. Rewards cancellation potential via adjacent inverse pairs (x, -x)
-    3. Rewards palindromic structure in relators (self-inverse patterns)
-    4. Counts balanced generator counts (equal numbers of generators and inverses)
-    5. Penalizes long alternating patterns that resist simplification
-    
-    The heuristic balances length reduction with structural cues that suggest
-    high potential for AC moves to simplify the presentation.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
     
-    # Split the presentation into two relators
-    r1 = presentation[:MAX_RELATOR_LENGTH]
-    r2 = presentation[MAX_RELATOR_LENGTH:]
+    # Extract the two relators
+    relator1 = presentation[:MAX_RELATOR_LENGTH]
+    relator2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Remove padding (non-zero entries are actual relator elements)
-    r1_actual = r1[r1 != 0]
-    r2_actual = r2[r2 != 0]
+    # Count non-zero (actual) elements in each relator
+    len1 = jnp.sum(relator1 != 0)
+    len2 = jnp.sum(relator2 != 0)
+    total_length = len1 + len2
     
-    # Total length (shorter is better, but we normalize later)
-    total_length = jnp.float32(jnp.size(r1_actual) + jnp.size(r2_actual))
+    # Normalize length penalty to [0, 1] range, with shorter being better
+    max_possible_len = 2 * MAX_RELATOR_LENGTH
+    length_score = 1.0 - total_length / max_possible_len
     
-    # Normalized length score: exponential decay with length (0->1.0, 72->~0.0)
-    length_score = jnp.exp(-0.05 * total_length)
+    # Compute cancellation potential (count adjacent x x^{-1} or x^{-1} x pairs)
+    def calc_cancellation(relator):
+        # Check adjacent pairs: if relator[i] * relator[i+1] == -1, they're inverses
+        # We consider pairs (1,-1), (-1,1), (2,-2), (-2,2)
+        pairs = relator[:-1] * relator[1:]
+        # Count positions where product is -1 or -4 (for generator pairs)
+        inv1_count = jnp.sum(pairs == -1)
+        inv2_count = jnp.sum(pairs == -4)
+        return inv1_count + inv2_count
     
-    # Function to count cancellation potential (adjacent inverse pairs)
-    def count_cancellation_pairs(relator):
-        # Shift by 1 to compare adjacent elements
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check if adjacent elements are inverses (x and -x)
-        is_inverse_pair = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
-        return jnp.sum(is_inverse_pair.astype(jnp.float32))
+    cancel1 = calc_cancellation(relator1)
+    cancel2 = calc_cancellation(relator2)
+    cancellation_score = (cancel1 + cancel2) / (MAX_RELATOR_LENGTH - 1)  # normalize by max possible pairs
     
-    # Calculate cancellation potential
-    r1_canc = count_cancellation_pairs(r1_actual)
-    r2_canc = count_cancellation_pairs(r2_actual)
-    total_cancellation = r1_canc + r2_canc
-    
-    # Cancellation score: higher cancellation potential is better (logarithmic scaling)
-    # Capped at reasonable maximum to avoid saturation
-    max_cancellation = jnp.float32(jnp.maximum(jnp.size(r1_actual), 1)) + jnp.float32(jnp.maximum(jnp.size(r2_actual), 1))
-    cancellation_score = jnp.log1p(total_cancellation) / jnp.log1p(max_cancellation)
-    
-    # Function to count palindromic potential (relator similar to its reverse)
-    def palindromic_score(relator):
-        length = jnp.size(relator)
-        if length == 0:
-            return jnp.float32(0.0)
-        # Pad to even length for symmetric comparison
-        mid = length // 2
-        # Compare first half with reversed second half
-        first_half = relator[:mid]
-        second_half = relator[-mid:] if mid > 0 else jnp.array([])
-        # Reverse second half
-        rev_second_half = second_half[::-1]
-        # Count matches with inverse (palindromic pattern implies x_i * x_{n-i+1} = identity)
-        matches = jnp.sum((first_half == -rev_second_half).astype(jnp.float32))
-        return matches / jnp.float32(jnp.maximum(mid, 1))
-    
-    r1_pal = palindromic_score(r1_actual)
-    r2_pal = palindromic_score(r2_actual)
-    avg_palindromic = (r1_pal + r2_pal) / 2.0
-    
-    # Function to check balance of generators (equal counts of generator and inverse)
-    def generator_balance(relator):
-        # Count occurrences of each generator and its inverse
-        gen1_count = jnp.sum((relator == 1).astype(jnp.float32))
-        inv1_count = jnp.sum((relator == -1).astype(jnp.float32))
-        gen2_count = jnp.sum((relator == 2).astype(jnp.float32))
-        inv2_count = jnp.sum((relator == -2).astype(jnp.float32))
+    # Check for palindrome structure (good for trivial group presentations)
+    def palindrome_score(relator):
+        # Get non-zero elements only
+        mask = relator != 0
+        non_zero = relator * mask
+        # Reverse the non-zero portion
+        reversed_rel = jnp.where(mask, relator[::-1], 0)
         
-        # Compute balance score: how close counts are to 1:1
-        balance1 = jnp.minimum(gen1_count, inv1_count) / jnp.maximum(1.0, jnp.maximum(gen1_count, inv1_count))
-        balance2 = jnp.minimum(gen2_count, inv2_count) / jnp.maximum(1.0, jnp.maximum(gen2_count, inv2_count))
+        # Compare non-zero positions
+        match_count = jnp.sum((relator != 0) & (reversed_rel != 0) & (relator == reversed_rel))
+        total_nonzero = jnp.sum(mask)
+        return match_count / total_nonzero if total_nonzero > 0 else 0.0
+    
+    pal1 = palindrome_score(relator1)
+    pal2 = palindrome_score(relator2)
+    palindrome_score_val = (pal1 + pal2) / 2.0
+    
+    # Check for symmetric relators (r2 ≈ r1 or r2 ≈ r1^{-1})
+    def symmetry_score():
+        # Create inverse of relator1
+        inv1 = -relator1
+        # Pad both to same length for comparison
+        len1_pad = jnp.sum(relator1 != 0)
+        len2_pad = jnp.sum(relator2 != 0)
+        min_len = jnp.minimum(len1_pad, len2_pad)
         
-        return (balance1 + balance2) / 2.0
+        if min_len == 0:
+            return 0.0
+        
+        # Compare first min_len elements of relator2 with relator1 and inv1
+        r1_match = jnp.sum(relator1[:min_len] == relator2[:min_len])
+        r1_inv_match = jnp.sum(inv1[:min_len] == relator2[:min_len])
+        
+        return jnp.maximum(r1_match, r1_inv_match) / min_len
     
-    r1_bal = generator_balance(r1_actual)
-    r2_bal = generator_balance(r2_actual)
-    avg_balance = (r1_bal + r2_bal) / 2.0
+    sym_score = symmetry_score()
     
-    # Combine all scores with learned weights (hand-tuned heuristics)
-    # Weights are chosen to prioritize length reduction but allow for
-    # strategic length increases when structural improvements are likely
-    # to enable greater cancellations later
-    weighted_score = (
-        0.4 * length_score +
-        0.3 * cancellation_score +
-        0.2 * avg_palindromic +
-        0.1 * avg_balance
-    )
+    # Combine scores with weights
+    # Weight cancellation and symmetry heavily as they indicate reducibility
+    weight_length = 0.2
+    weight_cancellation = 0.3
+    weight_palindrome = 0.2
+    weight_symmetry = 0.3
     
-    # Ensure output is in [0,1]
-    score = jnp.clip(weighted_score, 0.0, 1.0)
+    final_score = (weight_length * jnp.clip(length_score, 0.0, 1.0) +
+                   weight_cancellation * jnp.clip(cancellation_score, 0.0, 1.0) +
+                   weight_palindrome * jnp.clip(palindrome_score_val, 0.0, 1.0) +
+                   weight_symmetry * jnp.clip(sym_score, 0.0, 1.0))
     
-    return score
+    return jnp.clip(final_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -834,135 +872,110 @@ def heuristic_fn_v7(presentation: jnp.ndarray) -> float:
 ## Request 9
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v8`.
 
-**Latency:** 31.212 s
+**Latency:** 35.054 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v8(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic v8: Enhanced cancellation potential estimation with structural awareness.
+    r"""
+    Modified heuristic that captures structural properties conducive to trivialisation:
+    1. Encourages short presentations (primary driver)
+    2. Rewards high degree of local cancellation (adjacent inverse pairs like [1,-1], [2,-2])
+    3. Rewards palindromic symmetry in relators (potential for conjugation to simplify)
+    4. Rewards presence of sub-palindromes (fragments that could be removed via AC moves)
+    5. Penalises long runs of same generator (harder to cancel)
     
-    Key modifications from v0:
-    - Incorporates per-relator self-cancellation patterns (adjacent inverse pairs)
-    - Detects palindromic structure which often indicates potential for simplification
-    - Penalizes long runs of identical generators (redundant powers)
-    - Adds bonus for balanced generator counts (equal positive and negative occurrences)
-    - Applies logarithmic scaling to avoid saturation for very long presentations
-    
-    This heuristic is designed to detect "structure" even in long presentations that
-    might be intermediate steps in a trivialization path.
+    The scoring is normalised to [0,1] using sigmoid-like scaling to avoid extreme values.
     """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
-    # Split presentation into two relators
+    MAX_PRESENTATION_LENGTH = 2 * MAX_RELATOR_LENGTH
+
+    # Extract relators (assume first 36 entries = relator 1, last 36 = relator 2)
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper to count valid (non-zero) elements
-    def count_valid(relator):
-        return jnp.sum(relator != 0)
+    # Mask out padding (0s)
+    mask1 = r1 != 0
+    mask2 = r2 != 0
     
-    # Helper to find adjacent inverse pairs (a, -a)
-    def count_adjacent_inverses(relator):
-        # Create shifted versions to compare adjacent elements
-        shifted = jnp.roll(relator, -1)
-        # Check where adjacent elements are inverses (non-zero and sum to zero)
-        is_inverse = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
-        return jnp.sum(is_inverse[:-1])  # Exclude last position due to roll
+    # Lengths (non-zero entries)
+    len1 = jnp.sum(mask1)
+    len2 = jnp.sum(mask2)
+    total_len = len1 + len2
     
-    # Helper to count palindromic symmetry
-    def count_palindromic_pairs(relator):
-        # Only consider non-zero elements
-        valid_mask = relator != 0
-        valid_indices = jnp.where(valid_mask, jnp.arange(MAX_RELATOR_LENGTH), -1)
-        # Pad with -1 for invalid positions
-        valid_mask = jnp.where(valid_mask, 1, 0)
-        # Count matching pairs from start and end
-        reversed_relator = jnp.flip(relator * valid_mask)
-        matches = (relator == reversed_relator) & valid_mask
-        return jnp.sum(matches) // 2  # Divide by 2 since each pair counted twice
+    # Normalised length component (0=bad, 1=good)
+    # Use exponential decay so short presentations get high scores
+    # Normalise against max length 72, but use len=2 as ideal (trivial case)
+    ideal_len = 2.0
+    length_score = jnp.exp(-0.1 * jnp.maximum(0.0, total_len - ideal_len))
     
-    # Helper to measure generator balance (equal positive and negative counts)
-    def generator_balance(relator):
-        nonzero = relator != 0
-        # Count generator 1 (positive and negative)
-        gen1_count = jnp.sum((relator == 1) | (relator == -1))
-        gen2_count = jnp.sum((relator == 2) | (relator == -2))
-        pos_gen1 = jnp.sum(relator == 1)
-        neg_gen1 = jnp.sum(relator == -1)
-        pos_gen2 = jnp.sum(relator == 2)
-        neg_gen2 = jnp.sum(relator == -2)
-        # Balance score for each generator: min(pos, neg) / max(1, max(pos, neg))
-        balance1 = jnp.minimum(pos_gen1, neg_gen1) / jnp.maximum(1, jnp.maximum(pos_gen1, neg_gen1))
-        balance2 = jnp.minimum(pos_gen2, neg_gen2) / jnp.maximum(1, jnp.maximum(pos_gen2, neg_gen2))
-        return (balance1 + balance2) / 2
+    # Local cancellation pairs: count [g, -g] adjacent pairs in each relator
+    def count_cancellations(relator, mask):
+        # Create shifted version: [1,2,3,...] -> [0,1,2,...]
+        shifted = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), relator[:-1]])
+        # Identify where current = -shifted and neither is zero
+        cancel_pairs = (relator == -shifted) & (relator != 0) & (shifted != 0)
+        # Mask out pairs involving padding
+        return jnp.sum(cancel_pairs[:-1])  # avoid counting last element
+        # Actually, we need to be careful with indexing: pairs at positions (i,i+1)
     
-    # Helper to penalize long runs of identical generators (redundant powers)
-    def run_penalty(relator):
-        # Compare each element with next
-        shifted = jnp.roll(relator, -1)
-        is_same = (relator != 0) & (shifted != 0) & (relator == shifted)
-        runs = jnp.cumsum(is_same * (relator != 0))
-        # Count the number of positions in runs and compute penalty
-        run_lengths = jnp.bincount(runs, minlength=MAX_RELATOR_LENGTH + 1)
-        penalty = jnp.sum((run_lengths[2:] > 0) * (run_lengths[2:] - 1))
-        return penalty
+    # Better: compute adjacent cancellation pairs properly
+    def adj_cancellation_count(r, m):
+        # Consider positions where both r[i] and r[i+1] are non-zero
+        # Only count if r[i] == -r[i+1]
+        non_zero_mask = (r[:-1] != 0) & (r[1:] != 0)
+        cancel_mask = (r[:-1] == -r[1:]) & non_zero_mask
+        return jnp.sum(cancel_mask.astype(jnp.float32))
     
-    # Compute features for both relators
-    r1_len = count_valid(r1)
-    r2_len = count_valid(r2)
-    total_len = r1_len + r2_len
+    cancel_count = adj_cancellation_count(r1, mask1) + adj_cancellation_count(r2, mask2)
     
-    r1_inv_pairs = count_adjacent_inverses(r1)
-    r2_inv_pairs = count_adjacent_inverses(r2)
-    total_inv_pairs = r1_inv_pairs + r2_inv_pairs
+    # Normalise cancellation score: max possible is roughly length-1 per relator
+    # Use log scaling to avoid saturation
+    max_cancel = MAX_RELATOR_LENGTH - 1
+    cancel_score = jnp.log1p(cancel_count) / jnp.log1p(max_cancel)
     
-    r1_pal = count_palindromic_pairs(r1)
-    r2_pal = count_palindromic_pairs(r2)
-    total_pal = r1_pal + r2_pal
+    # Palindromic symmetry: check how many prefix/suffix matches (within tolerance)
+    # For relator r, compare r[i] with r[-i-1] for non-zero entries
+    def pal_score(relator):
+        # Truncate at actual length
+        actual_len = jnp.sum(relator != 0)
+        # Only check if length >= 2
+        def safe_pal():
+            # Get actual elements (trimming 0s)
+            # Use jnp.where to get indices of non-zero elements
+            indices = jnp.nonzero(relator != 0, size=MAX_RELATOR_LENGTH, fill_value=0)[0]
+            actual = jnp.take(relator, indices)
+            # Compare first half with reversed second half
+            half = actual.shape[0] // 2
+            if half < 1:
+                return 1.0
+            # Compute matching prefix/suffix
+            rev = jnp.flip(actual[:half])
+            forward = actual[-half:]
+            matches = jnp.sum((actual[:half] == jnp.flip(actual[-half:])).astype(jnp.float32))
+            return matches / half
+        return jax.lax.cond(actual_len >= 2, safe_pal, lambda: 0.5)
     
-    r1_balance = generator_balance(r1)
-    r2_balance = generator_balance(r2)
-    avg_balance = (r1_balance + r2_balance) / 2
+    pal_score_r1 = pal_score(r1)
+    pal_score_r2 = pal_score(r2)
+    pal_score_mean = (pal_score_r1 + pal_score_r2) / 2.0
     
-    r1_run_pen = run_penalty(r1)
-    r2_run_pen = run_penalty(r2)
-    total_run_pen = r1_run_pen + r2_run_pen
+    # Combined score: weighted sum
+    w_len = 0.5
+    w_cancel = 0.3
+    w_pal = 0.2
     
-    # Normalize features and combine with weights
-    # Normalize length component (shorter is better)
-    # Use log scale to avoid saturation for very long presentations
-    length_score = 1.0 - jnp.log2(jnp.maximum(total_len, 1)) / jnp.log2(MAX_RELATOR_LENGTH * 2 + 1)
+    raw_score = w_len * length_score + w_cancel * cancel_score + w_pal * pal_score_mean
     
-    # Normalize inverse pair component (more adjacent inverses is better)
-    max_pairs = MAX_RELATOR_LENGTH - 1
-    inv_pair_score = jnp.minimum(total_inv_pairs / jnp.maximum(1, max_pairs), 1.0)
+    # Sigmoid-like mapping to [0,1]
+    # Ensure strict bounds
+    score = 0.95 * (1.0 - jnp.exp(-raw_score * 3.0)) + 0.05
     
-    # Normalize palindromic component
-    max_pal = MAX_RELATOR_LENGTH
-    pal_score = jnp.minimum(total_pal / jnp.maximum(1, max_pal), 1.0)
-    
-    # Balance component (already in [0,1])
-    balance_score = avg_balance
-    
-    # Run penalty component (fewer runs is better)
-    max_run_pen = MAX_RELATOR_LENGTH
-    run_pen_score = 1.0 - jnp.minimum(total_run_pen / jnp.maximum(1, max_run_pen), 1.0)
-    
-    # Combine with weights (heuristic coefficients)
-    # Prioritize cancellation potential and structure
-    score = (0.3 * length_score + 
-             0.25 * inv_pair_score + 
-             0.2 * pal_score + 
-             0.15 * balance_score + 
-             0.1 * run_pen_score)
-    
-    # Clamp to [0, 1]
+    # Clamp to [0,1]
     return jnp.clip(score, 0.0, 1.0)
-```
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -970,130 +983,124 @@ def heuristic_fn_v8(presentation: jnp.ndarray) -> float:
 ## Request 10
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v9`.
 
-**Latency:** 18.940 s
+**Latency:** 25.893 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v9(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic based on:
+    1. *Cancellation potential*: counts maximal cancellation pairs (e.g., 1 followed by -1) across relator boundaries and within each relator.
+    2. *Palindrome symmetry*: rewards relators that are symmetric (potential self-cancellation under conjugation).
+    3. *Balanced generator counts*: rewards relators where each generator appears equally often as its inverse (necessary for triviality).
+    4. *Relator similarity*: encourages structural similarity between r1 and r2 (a pattern observed in known trivial presentations).
+    All components are normalized and combined into a bounded [0,1] score.
     """
-    Enhanced heuristic that measures structural simplification potential by:
-    1. Counting cancellation pairs (adjacent generator and its inverse)
-    2. Detecting palindromic structures (suggesting potential for reduction via relabeling)
-    3. Accounting for redundancy in the presentation (repeated subwords)
-    4. Normalizing by presentation length to avoid bias toward shorter presentations
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # Split into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
-    
-    # Helper to clean padding
-    def get_active_segments(relator):
-        non_zero_mask = relator != 0
-        active_len = jnp.sum(non_zero_mask.astype(jnp.int32))
-        return relator, active_len, non_zero_mask
-    
-    r1, len1, mask1 = get_active_segments(relator1)
-    r2, len2, mask2 = get_active_segments(relator2)
-    total_len = len1 + len2
-    
-    # Handle trivial case
-    trivial_score = jax.lax.cond(
-        total_len == 0,
-        lambda: 1.0,
-        lambda: 0.0
+    # Parse relators: first 36 entries = r1, next 36 = r2
+    r1 = presentation[:36]
+    r2 = presentation[36:]
+
+    # Mask padding (0s)
+    def get_active_portion(relator):
+        mask = relator != 0
+        return relator[mask]
+
+    r1_active = get_active_portion(r1)
+    r2_active = get_active_portion(r2)
+
+    # Length normalization (penalize long presentations)
+    total_len = r1_active.shape[0] + r2_active.shape[0]
+    MAX_LEN = 72.0
+    len_norm = 1.0 - (total_len / MAX_LEN)
+    len_norm = jnp.maximum(0.0, len_norm)  # floor at 0
+
+    # Cancellation pairs within each relator: count (g, -g) adjacent pairs
+    def count_cancellation_pairs(relator):
+        pairs = relator[:-1] * relator[1:]  # adjacent products: g * (-g) = -g^2 -> negative if cancellation
+        # A cancellation pair is when product < 0 and abs product is perfect square of generator (1 or 4)
+        abs_pairs = jnp.abs(pairs)
+        valid_cancellation = (pairs < 0) & ((abs_pairs == 1) | (abs_pairs == 4))
+        return jnp.sum(valid_cancellation.astype(jnp.int32))
+
+    cancel_r1 = count_cancellation_pairs(r1_active)
+    cancel_r2 = count_cancellation_pairs(r2_active)
+
+    # Cancellation across the concatenation boundary r1[-1] + r2[0]
+    def boundary_cancellation(r1_arr, r2_arr):
+        if (r1_arr.shape[0] == 0) or (r2_arr.shape[0] == 0):
+            return 0
+        product = r1_arr[-1] * r2_arr[0]
+        return ((product < 0) & ((jnp.abs(product) == 1) | (jnp.abs(product) == 4))).astype(jnp.int32)
+
+    boundary = boundary_cancellation(r1_active, r2_active)
+    total_cancel = cancel_r1 + cancel_r2 + boundary
+
+    # Normalise cancellation by expected max: length-1 per relator + 1 boundary
+    max_cancel = max(r1_active.shape[0] - 1, 0) + max(r2_active.shape[0] - 1, 0) + 1
+    cancel_norm = total_cancel / max(max_cancel, 1)
+
+    # Balanced generator counts: |count(g) - count(-g)| should be small
+    def generator_balance(relator):
+        if relator.shape[0] == 0:
+            return 0.0
+        counts = jnp.array([
+            jnp.sum(relator == 1) - jnp.sum(relator == -1),
+            jnp.sum(relator == 2) - jnp.sum(relator == -2)
+        ])
+        return jnp.sum(jnp.abs(counts)) / relator.shape[0]  # deviation per symbol
+
+    balance_r1 = generator_balance(r1_active)
+    balance_r2 = generator_balance(r2_active)
+    balance_norm = 1.0 - jnp.minimum(1.0, (balance_r1 + balance_r2))
+
+    # Palindrome symmetry: inner product of relator with its reversed sign-flipped version
+    def palindrome_score(relator):
+        if relator.shape[0] == 0:
+            return 0.0
+        rev = relator[::-1]
+        # reversed ideal for trivial relator: r == rev * (-1) (i.e., r_i = -rev_i)
+        sign_rev = -rev
+        matches = jnp.sum((relator == sign_rev).astype(jnp.int32))
+        return matches / relator.shape[0]
+
+    pal_r1 = palindrome_score(r1_active)
+    pal_r2 = palindrome_score(r2_active)
+    pal_norm = (pal_r1 + pal_r2) / 2.0
+
+    # Similarity between r1 and r2: longest common subsequence approximation via dot product
+    # Use normalized convolution-like similarity
+    def relator_similarity(a, b):
+        # Zero-pad to equal length
+        len_a = a.shape[0]
+        len_b = b.shape[0]
+        max_len = max(len_a, len_b)
+        a_pad = jnp.concatenate([a, jnp.zeros(max_len - len_a, dtype=jnp.int32)])
+        b_pad = jnp.concatenate([b, jnp.zeros(max_len - len_b, dtype=jnp.int32)])
+        norm = jnp.linalg.norm(a_pad.astype(jnp.float32)) * jnp.linalg.norm(b_pad.astype(jnp.float32))
+        if norm == 0:
+            return 0.0
+        return jnp.abs(jnp.dot(a_pad.astype(jnp.float32), b_pad.astype(jnp.float32))) / norm
+
+    sim = relator_similarity(r1_active, r2_active)
+
+    # Combine components (weights chosen heuristically based on empirical properties)
+    # Weight summary:
+    #   - len_norm: strong negative effect (penalize long)
+    #   - cancel_norm: strong positive (direct cancellation potential)
+    #   - balance_norm: moderate (trivial group requires balanced relators)
+    #   - pal_norm: moderate (self-inverse structure)
+    #   - sim: strong (similar relators often appear in trivial presentations)
+    score = (
+        0.2 * len_norm +
+        0.35 * cancel_norm +
+        0.15 * balance_norm +
+        0.15 * pal_norm +
+        0.15 * sim
     )
-    
-    def calc_non_trivial_score():
-        # 1. Cancellation pair counting (adjacent inverse pairs)
-        def count_cancellation_pairs(relator, length, mask):
-            # Shifted arrays for comparison
-            shifted = jnp.roll(relator, 1)
-            # Only consider non-padding positions and valid shifts
-            valid_positions = mask & (jnp.roll(mask, 1) | (jnp.arange(36) == 0))
-            
-            # Check for cancellation pairs: x and -x at adjacent positions
-            cancellation = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
-            return jnp.sum(cancellation.astype(jnp.int32))
-        
-        canc1 = count_cancellation_pairs(r1, len1, mask1)
-        canc2 = count_cancellation_pairs(r2, len2, mask2)
-        total_canc = canc1 + canc2
-        
-        # 2. Palindromic structure detection (potential for symmetry-based reduction)
-        def palindromic_score(relator, length, mask):
-            # Consider only non-padding elements
-            # Create reversed version masked appropriately
-            indices = jnp.arange(36)
-            rev_indices = 35 - indices
-            reversed_rel = jnp.where(mask, relator[rev_indices], 0)
-            
-            # Count matching positions
-            matches = (relator == reversed_rel) & (relator != 0)
-            return jnp.sum(matches.astype(jnp.float32)) / jnp.maximum(length.astype(jnp.float32), 1.0)
-        
-        pal1 = palindromic_score(r1, len1, mask1)
-        pal2 = palindromic_score(r2, len2, mask2)
-        avg_pal = (pal1 + pal2) / 2.0
-        
-        # 3. Redundancy detection - repeated subwords of length 2
-        def count_repeated_subwords(relator, length, mask):
-            # Count duplicate 2-letter substrings
-            if length < 2:
-                return 0.0
-                
-            # Create 2-substrings
-            substr1 = relator[:-1] * 3 + relator[1:]
-            valid_substring_mask = mask[:-1] & mask[1:]
-            valid_substrings = jnp.where(valid_substring_mask[:, None], substr1[:, None], 0)
-            
-            # Count duplicates using histogram approach
-            # Normalize to positive values for histogram
-            unique_substrings = jnp.unique(valid_substrings.flatten())
-            counts = jnp.bincount(
-                jnp.digitize(valid_substrings.flatten(), unique_substrings),
-                minlength=len(unique_substrings) + 1
-            )
-            
-            # Count substrings appearing more than once
-            repeats = jnp.sum((counts > 1).astype(jnp.float32))
-            return jnp.minimum(repeats / 5.0, 1.0)  # Cap contribution
-        
-        rep1 = count_repeated_subwords(r1, len1, mask1)
-        rep2 = count_repeated_subwords(r2, len2, mask2)
-        avg_rep = (rep1 + rep2) / 2.0
-        
-        # Normalize total score into [0,1]
-        # Base score from cancellation pairs (most important for reduction)
-        cancellations_score = jnp.minimum(total_canc / 10.0, 1.0)
-        
-        # Combine components
-        score = (
-            0.6 * cancellations_score +
-            0.25 * avg_pal +
-            0.15 * avg_rep
-        )
-        
-        # Apply length normalization: penalize long presentations moderately
-        len_factor = jnp.exp(-0.03 * total_len)
-        score = score * len_factor + (1 - len_factor) * 0.1
-        
-        # Ensure bounded [0,1]
-        return jnp.clip(score, 0.0, 1.0)
-    
-    return jax.lax.cond(total_len == 0, lambda: 1.0, calc_non_trivial_score)
-```
+
+    return jnp.clip(score, 0.0, 1.0).astype(jnp.float32)
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -1101,114 +1108,131 @@ def heuristic_fn_v9(presentation: jnp.ndarray) -> float:
 ## Request 11
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v10`.
 
-**Latency:** 18.952 s
+**Latency:** 25.413 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v10(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures structural properties likely to support trivialisation.
-    Combines:
-    - Normalized presentation length (shorter is better, but with penalty for very short non-trivial)
-    - Cancellation pair density (adjacent inverse pairs)
-    - Palindromic structure (relators that are self-inverse often indicate symmetry)
-    - Generator balance (equal counts of generator and inverse pairs across relators)
+    r"""
+    Enhanced heuristic that combines multiple structural signals:
+    1. Normalized presentation length (lower is better)
+    2. Cancellation potential: count of adjacent inverse pairs across relator boundaries
+    3. Palindromic symmetry score for relators (suggests potential for simplification)
+    4. Generator balance: measures symmetry between x1 and x2 usage
     
-    All components bounded to [0,1] and combined via weighted average.
+    These features are combined with hand-tuned weights based on group-theoretic
+    intuition that balanced, symmetric presentations with cancellation potential
+    are more likely to be trivialisable.
     
     Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+        presentation: Array representing relators r1, r2 concatenated. Shape (72,), int32.
+            0 = padding/identity, 1/-1 = x1/x1^{-1}, 2/-2 = x2/x2^{-1}
     
     Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
+        Scalar heuristic in [0,1] (higher = better chance of trivialisation)
     """
-    # Constants
-    MAX_LENGTH = 72
-    RELATOR_LENGTH = 36
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
     
-    # Split relators
-    r1 = presentation[:RELATOR_LENGTH]
-    r2 = presentation[RELATOR_LENGTH:]
+    # Extract relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # 1. Length component (normalize to [0,1])
-    # Ideal length is 2 (x1, x2). Use inverse exponential decay from ideal.
-    total_length = jnp.sum((r1 != 0).astype(jnp.float32)) + jnp.sum((r2 != 0).astype(jnp.float32))
-    ideal_length = 2.0
-    # Penalize deviations from ideal; scale carefully to [0,1]
-    length_score = jnp.exp(-0.1 * jnp.abs(total_length - ideal_length))
+    # Trim padding to get actual lengths
+    r1_len = jnp.sum(jnp.abs(r1) > 0)
+    r2_len = jnp.sum(jnp.abs(r2) > 0)
+    total_len = r1_len + r2_len
     
-    # 2. Cancellation pairs (adjacent inverse pairs within each relator)
-    # Count occurrences where r[i] = -r[i+1] for valid entries
-    def count_cancellation(relator):
-        # Create shifted versions
-        r_shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check for inverse pairs: r[i] + r_shifted[i] == 0 and neither is padding
-        is_valid = (relator != 0) & (r_shifted != 0)
-        is_inverse = (relator + r_shifted == 0)
-        return jnp.sum((is_valid & is_inverse).astype(jnp.float32))
+    # Normalize length term to [0,1] where 1 = minimal length (2)
+    # We use a smooth exponential decay to avoid sharp boundaries
+    length_score = jnp.exp(-0.05 * (total_len - 2))
     
-    c1 = count_cancellation(r1)
-    c2 = count_cancellation(r2)
-    # Normalize by max possible pairs (35 for each relator)
-    max_pairs = 35.0
-    cancel_score = jnp.clip((c1 + c2) / (2 * max_pairs), 0.0, 1.0)
+    # Compute adjacent inverse pairs (potential cancellation points)
+    # Check between r1[-1] and r2[0], and within each relator
+    def count_adjacent_inverses(relator):
+        # Check adjacent pairs in relator
+        rel = relator[:jnp.max(jnp.array([1, jnp.sum(jnp.abs(relator) > 0)])) - 1]
+        next_el = relator[1:jnp.sum(jnp.abs(relator) > 0)]
+        return jnp.sum(rel + next_el == 0)
     
-    # 3. Palindromic structure: for each relator, check similarity to its reverse
-    def pal_score(relator):
-        # Only consider non-padding prefix
-        mask = (relator != 0).astype(jnp.float32)
-        rel_len = jnp.sum(mask)
-        # If length is 0 or 1, perfect palindrome
-        is_trivial = (rel_len <= 1.5).astype(jnp.float32)
-        rel_len = jnp.maximum(rel_len, 1.0)
+    # Total adjacent inverse pairs within each relator
+    inv_r1 = count_adjacent_inverses(r1)
+    inv_r2 = count_adjacent_inverses(r2)
+    
+    # Check between relators (last non-zero of r1 and first non-zero of r2)
+    # Find last non-zero in r1
+    r1_mask = jnp.abs(r1) > 0
+    r1_indices = jnp.arange(MAX_RELATOR_LENGTH)
+    last_r1_idx = jnp.max(jnp.where(r1_mask, r1_indices, -1)) if jnp.any(r1_mask) else -1
+    
+    # Find first non-zero in r2
+    r2_mask = jnp.abs(r2) > 0
+    r2_indices = jnp.arange(MAX_RELATOR_LENGTH)
+    first_r2_idx = jnp.min(jnp.where(r2_mask, r2_indices, MAX_RELATOR_LENGTH)) if jnp.any(r2_mask) else MAX_RELATOR_LENGTH
+    
+    # Compute between-relator inverse
+    between_inv = 0.0
+    if last_r1_idx >= 0 and first_r2_idx < MAX_RELATOR_LENGTH:
+        between_inv = jnp.where(r1[last_r1_idx] + r2[first_r2_idx] == 0, 1.0, 0.0)
+    
+    total_inv = inv_r1 + inv_r2 + between_inv
+    
+    # Normalize inverse count (logarithmic scaling)
+    inv_score = jnp.arctan(0.5 * total_inv) / (jnp.pi/2)
+    
+    # Palindrome score: check how symmetric each relator is
+    def palindrome_score(relator):
+        # Get actual relator without padding
+        mask = jnp.abs(relator) > 0
+        indices = jnp.arange(MAX_RELATOR_LENGTH)
+        real_len = jnp.sum(mask)
         
-        # Reverse the non-padding part
-        indices = jnp.arange(RELATOR_LENGTH - 1, -1, -1)
-        rev = relator[indices]
-        
-        # Compute matching ratio within non-padding prefix
-        rev_mask = mask  # Same support as original for the prefix
-        matches = (relator == rev) & (mask == 1.0)
-        return jnp.sum(matches.astype(jnp.float32)) / rel_len * (1.0 - is_trivial) + is_trivial
+        if real_len == 0:
+            return 1.0  # Empty relator is maximally symmetric
+            
+        rel_nonzero = jnp.where(mask, relator, 0)
+        # Compare relator with its inverse-reversed version
+        rev_indices = jnp.arange(real_len - 1, -1, -1)
+        reversed_rel = rel_nonzero[rev_indices]
+        inverse_reversed = -reversed_rel
+        # Compare up to real_len elements
+        matches = jnp.sum((rel_nonzero[:real_len] == inverse_reversed[:real_len]) * mask[:real_len])
+        return matches / real_len
     
-    p1 = pal_score(r1)
-    p2 = pal_score(r2)
-    pal_score_val = (p1 + p2) / 2.0
+    pal_score = (palindrome_score(r1) + palindrome_score(r2)) / 2.0
     
-    # 4. Generator balance: counts of generators and inverses should be roughly equal
-    # Per relator, check (count(1) vs count(-1)) and (count(2) vs count(-2))
-    def balance(relator):
-        ones = jnp.sum((relator == 1).astype(jnp.float32)) - jnp.sum((relator == -1).astype(jnp.float32))
-        twos = jnp.sum((relator == 2).astype(jnp.float32)) - jnp.sum((relator == -2).astype(jnp.float32))
-        # Normalize by max possible deviation (relator length)
-        rel_len = jnp.sum((relator != 0).astype(jnp.float32))
-        rel_len = jnp.maximum(rel_len, 1.0)
-        # Normalize absolute imbalance to [0,1]
-        imbalance = (jnp.abs(ones) + jnp.abs(twos)) / rel_len
-        return 1.0 - imbalance
+    # Generator balance: measure symmetry between x1 and x2 usage
+    # Count x1 and x2 occurrences (including inverses) in each relator
+    def generator_counts(relator):
+        mask = jnp.abs(relator) > 0
+        count_x1 = jnp.sum((jnp.abs(relator) == 1) * mask)
+        count_x2 = jnp.sum((jnp.abs(relator) == 2) * mask)
+        return count_x1, count_x2
     
-    b1 = balance(r1)
-    b2 = balance(r2)
-    balance_score = (b1 + b2) / 2.0
+    x1_r1, x2_r1 = generator_counts(r1)
+    x1_r2, x2_r2 = generator_counts(r2)
     
-    # Combine components with weights: prefer length and cancellation highly
-    w_len, w_cancel, w_pal, w_bal = 0.4, 0.3, 0.15, 0.15
-    total_score = (
-        w_len * length_score +
-        w_cancel * cancel_score +
-        w_pal * pal_score_val +
-        w_bal * balance_score
+    # Compute balance as inverse relative difference
+    def balance_score(a, b):
+        total = a + b
+        return jnp.where(total == 0, 1.0, 1.0 - jnp.abs(a - b) / total)
+    
+    bal_r1 = balance_score(x1_r1, x2_r1)
+    bal_r2 = balance_score(x1_r2, x2_r2)
+    bal_score = (bal_r1 + bal_r2) / 2.0
+    
+    # Combine scores with weights reflecting importance
+    # Main factors: short length, high cancellation potential, symmetry
+    score = (
+        0.4 * length_score +
+        0.3 * inv_score +
+        0.2 * pal_score +
+        0.1 * bal_score
     )
     
-    # Ensure output is in [0,1]
-    return jnp.clip(total_score, 0.0, 1.0)
-```
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -1216,23 +1240,21 @@ def heuristic_fn_v10(presentation: jnp.ndarray) -> float:
 ## Request 12
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v11`.
 
-**Latency:** 18.325 s
+**Latency:** 15.215 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v11(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures structural properties indicative of trivialisability.
+    r"""
+    Enhanced heuristic that captures structural properties conducive to trivialisation.
     
-    Key improvements over v0:
-    - Penalizes long presentations but with diminishing returns (log scale)
-    - Rewards cancellation patterns (adjacent inverse pairs and palindromic substrings)
-    - Encourages symmetry between relators (similarity score)
-    - Rewards short repeated patterns that suggest potential for reduction
+    Key improvements:
+    1. Measures cancellation potential by counting matching generator/inverse pairs across relators
+    2. Penalizes long runs of repeated generators (indicating inefficient representation)
+    3. Rewards symmetry (palindromic patterns) as they often indicate reducible structure
+    4. Penalizes imbalance between relator lengths as balanced presentations are easier to manipulate
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -1242,101 +1264,64 @@ def heuristic_fn_v11(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
     
     # Split into two relators
-    relator1 = presentation[:MAX_RELATOR_LENGTH]
-    relator2 = presentation[MAX_RELATOR_LENGTH:]
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Get non-padding masks
-    mask1 = relator1 != 0
-    mask2 = relator2 != 0
+    # Remove padding (0) to get actual relators
+    r1_active = r1[r1 != 0]
+    r2_active = r2[r2 != 0]
     
-    # Count actual generators (non-zero entries)
-    len1 = jnp.sum(mask1)
-    len2 = jnp.sum(mask2)
-    total_len = len1 + len2
+    # Total presentation length (normalized)
+    total_length = len(r1_active) + len(r2_active)
+    max_possible_length = 2 * MAX_RELATOR_LENGTH
     
-    # Length component: log-scale penalty to avoid harsh惩罚 for temporary growth
-    max_possible_len = 72.0
-    length_score = jnp.maximum(0, 1 - jnp.log1p(total_len) / jnp.log1p(max_possible_len))
+    # Cancellation potential score: count matching generator/inverse pairs
+    # between relators (e.g., 1 and -1 cancel)
+    # Use vectorized operations for efficiency
+    # Count positive and negative occurrences across both relators
+    all_generators = jnp.concatenate([r1_active, r2_active])
     
-    # Cancellation pairs: count adjacent inverse pairs within each relator
-    def count_cancellation_pairs(relator, mask):
-        # Check for adjacent inverse pairs (x, -x)
-        shifted = jnp.roll(relator, 1)
-        # Only consider non-padding positions and their neighbors
-        valid_pairs = mask & (jnp.roll(mask, 1) | (jnp.arange(relator.shape[0]) == 0))
-        # Count pairs where current and previous are inverses
-        is_inverse = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
-        return jnp.sum(is_inverse & valid_pairs)
+    # Count how many pairs would cancel (min of counts for each generator type)
+    counts = jnp.bincount(jnp.abs(all_generators), length=N_GENERATORS+1)
+    # Generator types 1 and 2 (index 0 unused)
+    cancel_pairs = jnp.minimum(counts[1], counts[2]) * 2  # each pair contributes 2 to cancellation
+    cancel_score = cancel_pairs / max_possible_length
     
-    cancel1 = count_cancellation_pairs(relator1, mask1)
-    cancel2 = count_cancellation_pairs(relator2, mask2)
-    total_cancel = cancel1 + cancel2
+    # Palindromic potential: check if relators have symmetric structure
+    def palindromic_score(relator):
+        if len(relator) == 0:
+            return 0.0
+        # Check how many positions match when reversed
+        reversed_rel = relator[::-1]
+        matches = jnp.sum(relator == reversed_rel)
+        return matches / len(relator)
     
-    # Length-normalized cancellation score
-    max_possible_cancel = jnp.maximum(1, jnp.maximum(len1, len2))
-    cancel_score = jnp.minimum(1.0, total_cancel / max_possible_cancel)
+    p1 = palindromic_score(r1_active) if len(r1_active) > 0 else 0.0
+    p2 = palindromic_score(r2_active) if len(r2_active) > 0 else 0.0
+    symmetry_score = (p1 + p2) / 2.0
     
-    # Palindromic structure: count how many positions match their mirror position
-    def pal_score(relator, mask):
-        # Mirror positions: i <-> n-1-i
-        n = jnp.sum(mask)
-        if n == 0:
-            return jnp.array(0.0)
-        
-        # Create reversed version
-        reversed_relator = jnp.where(mask, jnp.flip(relator), 0)
-        
-        # Count matches in symmetric positions
-        matches = (relator == reversed_relator) & mask
-        return jnp.sum(matches) / n
+    # Length penalty (we want shorter presentations, but not at cost of losing structure)
+    length_penalty = 1.0 - (total_length / max_possible_length) * 0.7
     
-    pal1 = pal_score(relator1, mask1)
-    pal2 = pal_score(relator2, mask2)
-    pal_score_val = (pal1 + pal2) / 2.0
+    # Balance between relator lengths (prefers similar lengths)
+    length_balance = 1.0 - jnp.abs(len(r1_active) - len(r2_active)) / max_possible_length
     
-    # Similarity between relators: compare first k non-zero elements
-    def relator_similarity(rel1, mask1, rel2, mask2):
-        # Get non-zero positions
-        n1 = jnp.sum(mask1)
-        n2 = jnp.sum(mask2)
-        if n1 == 0 or n2 == 0:
-            return jnp.array(0.0)
-        
-        # Compare prefixes (up to min length)
-        min_len = jnp.minimum(n1, n2)
-        
-        # Extract non-zero prefix
-        prefix1 = jnp.where(mask1, rel1, 0)[:jnp.minimum(MAX_RELATOR_LENGTH, int(min_len))]
-        prefix2 = jnp.where(mask2, rel2, 0)[:jnp.minimum(MAX_RELATOR_LENGTH, int(min_len))]
-        
-        # Pad to equal length
-        max_prefix_len = jnp.maximum(len(prefix1), len(prefix2))
-        # Note: Since we're using jnp and the lengths are small, we can use simple padding
-        prefix1_padded = jnp.pad(prefix1, (0, int(max_prefix_len - len(prefix1))))
-        prefix2_padded = jnp.pad(prefix2, (0, int(max_prefix_len - len(prefix2))))
-        
-        # Normalized similarity
-        matches = (prefix1_padded == prefix2_padded)
-        return jnp.sum(matches) / max_prefix_len
+    # Combine scores with weights learned from analysis
+    # Weights emphasize structural features over raw length
+    score = (
+        0.4 * cancel_score +
+        0.3 * symmetry_score +
+        0.2 * length_penalty +
+        0.1 * length_balance
+    )
     
-    sim_score = relator_similarity(relator1, mask1, relator2, mask2)
-    
-    # Combined score: weighted average of components
-    length_weight = 0.3
-    cancel_weight = 0.25
-    pal_weight = 0.2
-    sim_weight = 0.25
-    
-    final_score = (length_weight * length_score + 
-                   cancel_weight * cancel_score + 
-                   pal_weight * pal_score_val + 
-                   sim_weight * sim_score)
-    
-    # Ensure output is in [0,1]
-    return jnp.clip(final_score, 0.0, 1.0)
+    # Ensure bounded in [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1345,127 +1330,145 @@ def heuristic_fn_v11(presentation: jnp.ndarray) -> float:
 ## Request 13
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v12`.
 
-**Latency:** 18.572 s
+**Latency:** 25.206 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v12(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic focusing on cancellation potential and structural simplicity.
+    Key modifications from v0:
+    1. Counts "cancelable pairs" (adjacent inverse pairs like [1, -1] or [-2, 2])
+    2. Counts symmetric patterns (palindromic substrings) that suggest reducibility
+    3. Penalizes long runs of the same generator (which resist cancellation)
+    4. Incorporates presentation length but with diminishing returns to avoid local maxima
+    5. Detects self-conjugate patterns (r_i ≈ g r_i g^{-1}) indicating group structure
     """
-    Improved heuristic that captures structural properties conducive to trivialisation.
-    It considers:
-    1. Current presentation length (shorter is better)
-    2. Number of immediate cancellation pairs (neighboring inverse pairs)
-    3. Palindromic structure in relators (suggests symmetry that may simplify)
-    4. Balance of generator/inverse counts per relator (closer to balanced = better)
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    Weights are carefully chosen to avoid overfitting, with emphasis on detection
-    of cancellation opportunities even in longer presentations.
+    # Split into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+    # Remove padding (0) for processing
+    def strip_padding(relator):
+        mask = relator != 0
+        return jnp.where(mask, relator, 0)
     
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # [EVOLVE-BLOCK-START]
+    r1 = strip_padding(r1)
+    r2 = strip_padding(r2)
     
-    # Split presentation into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    # Helper to get non-zero length
+    def get_length(relator):
+        return jnp.sum(relator != 0)
     
-    # Helper to count cancellation pairs (adjacent inverse pairs)
-    def count_cancellation_pairs(relator):
-        # Create shifted versions to compare adjacent elements
-        shifted = jnp.roll(relator, -1)
-        # Check for inverse pairs: a[i] == -a[i+1] (non-zero condition)
-        is_inverse = (relator * shifted == -1) & (relator != 0) & (shifted != 0)
-        return jnp.sum(is_inverse)
+    len_r1 = get_length(r1)
+    len_r2 = get_length(r2)
+    total_len = len_r1 + len_r2
     
-    # Helper to check palindromic structure (within non-zero padding)
-    def palindromic_score(relator):
-        # Create mask for non-padding elements
-        non_pad_mask = relator != 0
-        # Get non-padding elements
-        non_pad_rels = jnp.where(non_pad_mask, relator, 0)
-        # Count length of non-zero prefix (actual relator length)
-        indices = jnp.arange(36)
-        first_zero = jnp.argmax(jnp.where(non_pad_mask, 0, 1))
-        actual_len = jnp.where(first_zero == 0, 36, first_zero)
+    # Helper to count cancelable pairs
+    def count_cancel_pairs(relator):
+        # Check adjacent pairs: [i, -i]
+        shift_forward = jnp.roll(relator, -1)
+        # Ensure last element doesn't pair with first (cyclic)
+        mask = jnp.arange(MAX_RELATOR_LENGTH) < get_length(relator)
+        shift_forward = jnp.where(mask, shift_forward, 0)
         
-        # Only compute if length > 1
-        def true_branch():
-            # Get the actual relator (up to first zero)
-            actual_rel = non_pad_rels[:actual_len]
-            # Compare with reversed version
-            reversed_rel = jnp.flip(actual_rel)
-            matches = jnp.sum(actual_rel == reversed_rel)
-            return matches / actual_len
+        is_cancel = (relator * shift_forward == -1) | (relator * shift_forward == -4)
+        return jnp.sum(is_cancel)
+    
+    cancel_pairs_r1 = count_cancel_pairs(r1)
+    cancel_pairs_r2 = count_cancel_pairs(r2)
+    total_cancel_pairs = cancel_pairs_r1 + cancel_pairs_r2
+    
+    # Helper to count symmetric patterns (substrings that are palindromic)
+    def count_palindromes(relator):
+        length = get_length(relator)
+        # Only check substrings of length 3 to 5 for efficiency
+        def check_palindrome_length(k):
+            # Check all substrings of length k
+            indices = jnp.arange(MAX_RELATOR_LENGTH - k + 1)
+            starts = jnp.where(indices < length - k + 1, indices, MAX_RELATOR_LENGTH)
+            
+            # For each position, extract substring
+            def extract_and_check(i):
+                substring = relator[i:i+k]
+                # Pad if needed
+                padded = jnp.where(jnp.arange(k) < (length - i), substring, 0)
+                # Check palindrome: compare with reversed
+                reversed_sub = jnp.flip(padded)
+                return jnp.all(padded == reversed_sub)
+            
+            counts = jax.vmap(extract_and_check)(indices)
+            return jnp.sum(counts)
         
-        def false_branch():
-            return jnp.array(0.0)
+        pal_count_3 = check_palindrome_length(3)
+        pal_count_4 = check_palindrome_length(4)
+        pal_count_5 = check_palindrome_length(5)
+        return pal_count_3 + pal_count_4 + pal_count_5
+    
+    pal_r1 = count_palindromes(r1)
+    pal_r2 = count_palindromes(r2)
+    total_palindromes = pal_r1 + pal_r2
+    
+    # Helper to count long runs (bad for cancellation)
+    def count_long_runs(relator):
+        length = get_length(relator)
+        if length <= 1:
+            return 0
         
-        return jax.lax.cond(actual_len > 1, true_branch, false_branch)
-    
-    # Helper for balance score: absolute difference between generator and inverse counts
-    def balance_score(relator):
-        gen1_count = jnp.sum(relator == 1)
-        gen1_inv_count = jnp.sum(relator == -1)
-        gen2_count = jnp.sum(relator == 2)
-        gen2_inv_count = jnp.sum(relator == -2)
+        # Count positions where same generator repeats 3+ times
+        def check_run_at(i):
+            run_length = 1
+            # Check for run of at least 3
+            for j in range(1, 3):
+                if i + j < MAX_RELATOR_LENGTH:
+                    if relator[i] != 0 and relator[i] == relator[i+j]:
+                        run_length += 1
+            return (run_length >= 3).astype(jnp.int32)
         
-        # Total generators and inverses
-        total_gens = gen1_count + gen2_count
-        total_invs = gen1_inv_count + gen2_inv_count
-        
-        # Perfectly balanced when equal counts
-        total = total_gens + total_invs
-        return jax.lax.cond(total > 0, 
-                           lambda: 1.0 - jnp.abs(total_gens - total_invs) / total,
-                           lambda: 1.0)
+        runs = jax.vmap(check_run_at)(jnp.arange(MAX_RELATOR_LENGTH))
+        return jnp.sum(runs)
     
-    # Compute all components
-    # Length component (normalised by max possible length)
-    total_length = jnp.sum((presentation != 0).astype(jnp.float32))
-    length_score = 1.0 - (total_length - 2) / (2 * 36 - 2)  # 2 is ideal length (trivial relators)
-    length_score = jnp.maximum(0.0, jnp.minimum(1.0, length_score))
+    long_runs_r1 = count_long_runs(r1)
+    long_runs_r2 = count_long_runs(r2)
+    total_long_runs = long_runs_r1 + long_runs_r2
     
-    # Cancellation pairs
-    cancel_pairs1 = count_cancellation_pairs(relator1)
-    cancel_pairs2 = count_cancellation_pairs(relator2)
-    total_cancel_pairs = cancel_pairs1 + cancel_pairs2
-    max_possible_cancel = 35 * 2  # max 35 pairs per relator
-    cancel_score = total_cancel_pairs / max_possible_cancel
+    # Normalize components to [0,1] range
+    # Length score: inverse relationship with diminishing returns
+    length_score = jnp.exp(-0.03 * total_len)
     
-    # Palindromic scores
-    pal_score1 = palindromic_score(relator1)
-    pal_score2 = palindromic_score(relator2)
-    avg_pal_score = (pal_score1 + pal_score2) / 2.0
+    # Cancellation potential score
+    max_cancel = MAX_RELATOR_LENGTH - 1  # max possible adjacent pairs per relator
+    cancel_score = jnp.clip(total_cancel_pairs / (2 * max_cancel), 0, 1)
     
-    # Balance scores
-    bal_score1 = balance_score(relator1)
-    bal_score2 = balance_score(relator2)
-    avg_bal_score = (bal_score1 + bal_score2) / 2.0
+    # Palindrome score (structural hint)
+    # Estimate max possible palindromes (rough approximation)
+    max_pal = MAX_RELATOR_LENGTH * 2  # generous upper bound
+    pal_score = jnp.clip(total_palindromes / max_pal, 0, 1)
     
-    # Combine scores with weights (normalized to keep in [0,1])
-    # Weights chosen to emphasize cancellation and structure
-    weight_len = 0.3
-    weight_cancel = 0.35
-    weight_pal = 0.15
-    weight_bal = 0.2
+    # Penalty for long runs (bad)
+    max_runs = MAX_RELATOR_LENGTH * 0.5  # rough estimate
+    run_penalty = jnp.clip(total_long_runs / max_runs, 0, 1)
+    run_score = 1 - run_penalty
     
-    total_score = (weight_len * length_score +
-                   weight_cancel * cancel_score +
-                   weight_pal * avg_pal_score +
-                   weight_bal * avg_bal_score)
+    # Combine scores with weights reflecting heuristic importance
+    # Give highest weight to cancellation potential (most direct reduction path)
+    # Then palindrome/structure (suggests hidden simplifications)
+    # Then length (but with diminishing returns to avoid local maxima)
+    # Penalize long runs as they resist simplification
+    score = (0.4 * cancel_score + 
+             0.3 * pal_score + 
+             0.25 * length_score + 
+             0.05 * run_score)
     
-    return jnp.clip(total_score, 0.0, 1.0)
-    # [EVOLVE-BLOCK-END]
+    # Ensure bounded to [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1474,133 +1477,96 @@ def heuristic_fn_v12(presentation: jnp.ndarray) -> float:
 ## Request 14
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v13`.
 
-**Latency:** 20.569 s
+**Latency:** 18.324 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v13(presentation: jnp.ndarray) -> float:
+    r"""
+    Heuristic for group presentation trivialisation: extends baseline by incorporating
+    cancellation potential, palindrome symmetry, and length growth tolerance.
+    
+    Key improvements over v0:
+    1. Counts *local cancellations* (adjacent inverse pairs) which are primary
+       drivers of reduction during AC moves
+    2. Measures *global symmetry* via reverse-complement matching (palindromic
+       self-similarity) which often appears in trivial presentations
+    3. Penalises *asymmetry* between relators to encourage balanced trivialisation paths
+    4. Uses soft penalty for excessive length while allowing strategic expansion
+    
+    Returns a bounded [0,1] score where higher indicates greater trivialisation potential.
     """
-    Heuristic based on cancellation potential and structural patterns.
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    The heuristic computes:
-    1. Normalized cancellation potential: how many adjacent inverse pairs exist (counting cyclically)
-    2. Palindromic symmetry: measure of symmetry in relators which often indicates reducibility
-    3. Generator balance: difference in occurrences between generators and their inverses
-    4. Length penalty for very long presentations
+    # Extract relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    All components are normalized and combined to produce a score in [0,1].
+    # Identify non-padding positions
+    is_pad_r1 = (r1 == 0)
+    is_pad_r2 = (r2 == 0)
     
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+    # Count effective length for each relator
+    len_r1 = MAX_RELATOR_LENGTH - jnp.sum(is_pad_r1)
+    len_r2 = MAX_RELATOR_LENGTH - jnp.sum(is_pad_r2)
+    total_len = len_r1 + len_r2
     
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # Split into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    # --- CANCELLATION POTENTIAL ---
+    # Count adjacent inverse pairs in each relator (potential for AC1 reduction)
+    def count_inverses(relator):
+        # Create shifted versions: relator[i] and relator[i+1]
+        r_shifted = jnp.concatenate([relator[1:], jnp.array([0])])
+        # Check for inverse pairs: a and -a where a ≠ 0
+        is_inverse = (relator * r_shifted < 0) & (relator != 0) & (r_shifted != 0)
+        # Avoid double counting at boundaries (handled by padding logic)
+        return jnp.sum(is_inverse)
     
-    # Helper to compute cancellation potential for a single relator
-    def relator_cancellation(relator):
-        # Find non-zero positions
-        mask = relator != 0
-        non_zero_rel = jnp.where(mask, relator, jnp.zeros_like(relator))
-        
-        # Count direct inverse pairs (adjacent)
-        # Shifted by one position and compare with negation
-        shifted = jnp.roll(non_zero_rel, 1)
-        inverse_pairs = jnp.sum((non_zero_rel != 0) & 
-                                (shifted != 0) & 
-                                (non_zero_rel + shifted == 0))
-        
-        # Also check cyclic wrap-around (last and first elements)
-        first_nonzero = jnp.where(mask, non_zero_rel, jnp.zeros_like(relator))[0]
-        last_nonzero = jnp.where(mask, non_zero_rel, jnp.zeros_like(relator))[-1]
-        cyclic_inverse = jnp.where((first_nonzero != 0) & (last_nonzero != 0) & 
-                                   (first_nonzero + last_nonzero == 0), 1.0, 0.0)
-        
-        # Count maximum possible cancellations (length/2)
-        length = jnp.sum(mask)
-        max_cancellations = length / 2.0
-        
-        # Normalized cancellation score (clamped to [0,1])
-        return jnp.clip((inverse_pairs + cyclic_inverse) / jnp.maximum(max_cancellations, 1.0), 0.0, 1.0)
+    canc_r1 = count_inverses(r1)
+    canc_r2 = count_inverses(r2)
+    total_cancellation = canc_r1 + canc_r2
     
-    # Helper to compute palindromic symmetry score
+    # --- GLOBAL SYMMETRY (PALINDROMIC CHECK) ---
+    # Check if relators or their concatenation resemble reversible structures
     def palindromic_score(relator):
-        mask = relator != 0
-        non_zero_rel = jnp.where(mask, relator, jnp.zeros_like(relator))
-        length = jnp.sum(mask)
-        
-        # Only check if length > 1
-        def calc_sym():
-            half_len = jnp.int32(length / 2)
-            # Get first half and last half reversed
-            first_half = non_zero_rel[:half_len]
-            last_half_rev = jnp.flip(non_zero_rel[length - half_len:])
-            
-            # Pad for comparison
-            pad_len = 36 - half_len
-            first_half_padded = jnp.pad(first_half, (0, pad_len), constant_values=0)[:36]
-            last_half_rev_padded = jnp.pad(last_half_rev, (0, pad_len), constant_values=0)[:36]
-            
-            # Check if they are inverses (for palindrome-like pattern)
-            match = jnp.sum(first_half_padded != 0 & (first_half_padded + last_half_rev_padded == 0))
-            return jnp.clip(match / jnp.maximum(half_len, 1), 0.0, 1.0)
-        
-        return jnp.where(length <= 1, 0.0, calc_sym())
+        # Reverse the relator (ignoring padding)
+        mask = ~is_pad_r1 if jnp.array_equal(relator, r1) else ~is_pad_r2
+        # Build reversed non-pad sequence
+        rev_rel = jnp.flip(relator)
+        # Only compare non-pad positions
+        rev_rel = jnp.where(mask, rev_rel, 0)
+        # Compare element-wise (with padding)
+        match = (relator == rev_rel) | (mask & (relator == 0)) | (mask & (rev_rel == 0))
+        return jnp.mean(jnp.where(mask, match, True))
     
-    # Compute generator balance for each relator
-    def generator_balance_score(relator):
-        mask = relator != 0
-        non_zero_rel = jnp.where(mask, relator, jnp.zeros_like(relator))
-        
-        # Count occurrences of each generator and its inverse
-        count_x1 = jnp.sum(non_zero_rel == 1)
-        count_x1_inv = jnp.sum(non_zero_rel == -1)
-        count_x2 = jnp.sum(non_zero_rel == 2)
-        count_x2_inv = jnp.sum(non_zero_rel == -2)
-        
-        # Ideal balance: equal counts of generator and inverse
-        total = count_x1 + count_x1_inv + count_x2 + count_x2_inv
-        
-        def balanced():
-            return 1.0 - (jnp.abs(count_x1 - count_x1_inv) + jnp.abs(count_x2 - count_x2_inv)) / total
-        
-        return jnp.where(total == 0, 0.0, balanced())
+    pal1 = palindromic_score(r1)
+    pal2 = palindromic_score(r2)
+    avg_pal = (pal1 + pal2) / 2
     
-    # Compute all scores
-    c1 = relator_cancellation(relator1)
-    c2 = relator_cancellation(relator2)
-    p1 = palindromic_score(relator1)
-    p2 = palindromic_score(relator2)
-    b1 = generator_balance_score(relator1)
-    b2 = generator_balance_score(relator2)
+    # --- RELATOR BALANCE ---
+    # Prefer balanced relator lengths (closer to equal = better)
+    balance = 1.0 - jnp.abs(len_r1 - len_r2) / MAX_RELATOR_LENGTH
     
-    # Compute presentation length score (prefer shorter)
-    length1 = jnp.sum(relator1 != 0)
-    length2 = jnp.sum(relator2 != 0)
-    total_length = length1 + length2
+    # --- SCORE COMPOSITION ---
+    # Normalise components to [0,1] range and combine
+    # Max cancellation per relator: length-1 (since adjacent pairs), normalise
+    max_canc_per_rel = MAX_RELATOR_LENGTH - 1
+    norm_cancellation = total_cancellation / (2 * max_canc_per_rel)
+    # Length penalty: use exponential decay for short lengths, mild penalty for long
+    len_factor = jnp.exp(-total_len / (MAX_PRESENTATION_LENGTH * 2.0))
+    # Combine with weights (heuristic tuning)
+    score = (0.3 * norm_cancellation + 
+             0.3 * avg_pal + 
+             0.2 * balance + 
+             0.2 * len_factor)
     
-    # Length score: exponential decay with length, but with offset to avoid too harsh penalty
-    length_score = jnp.exp(-0.03 * total_length)
-    
-    # Combined score (weighted average with emphasis on cancellation)
-    cancellation_score = (c1 + c2) / 2.0
-    symmetry_score = (p1 + p2) / 2.0
-    balance_score = (b1 + b2) / 2.0
-    
-    # Final weighted combination
-    score = 0.5 * cancellation_score + 0.2 * symmetry_score + 0.2 * balance_score + 0.1 * length_score
-    
-    # Ensure bounded in [0,1]
-    return jnp.clip(score, 0.0, 1.0)
+    # Clamp to [0,1]
+    score = jnp.clip(score, 0.0, 1.0)
+    return score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1609,122 +1575,118 @@ def heuristic_fn_v13(presentation: jnp.ndarray) -> float:
 ## Request 15
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v14`.
 
-**Latency:** 17.260 s
+**Latency:** 22.471 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v14(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic that combines multiple structural signals to better estimate
+    potential for trivialisation:
+    1. Normalised presentation length (shorter is better)
+    2. Count of cancellation-prone pairs (adjacent inverse pairs)
+    3. Symmetry score (palindromic structure in relators)
+    4. Balance score (equal counts of generators and inverses per relator)
+    
+    These signals are combined with exponentially weighted contributions to prioritize
+    cancellation potential and symmetry — key features in successful trivialisation paths.
+    
+    Args:
+        presentation: Array representing current group presentation in terms of relators
+            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+    
+    Returns:
+        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
+        future (higher is better).
     """
-    Enhanced heuristic that captures structural properties favorable for trivialisation,
-    combining cancellation potential, symmetry, and length management.
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    The heuristic scores:
-    1. Cancellation pairs: matching generator-inverse pairs at symmetric positions in relators
-    2. Palindromic structure: symmetric relators often indicate simplifiability
-    3. Repeated substrings: patterns that suggest reducibility
-    4. Length penalty: moderate length is preferred over extreme growth
-    5. Generators per relator balance: distributions with both generators appearing
+    # Extract relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    All components are normalized and weighted appropriately to produce a score in [0,1].
-    """
-    # Split presentation into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    # Compute actual lengths (non-zero entries)
+    len_r1 = jnp.sum(r1 != 0)
+    len_r2 = jnp.sum(r2 != 0)
+    total_len = len_r1 + len_r2
     
-    # Compute active lengths (non-zero elements)
-    len1 = jnp.sum(r1 != 0)
-    len2 = jnp.sum(r2 != 0)
-    total_len = len1 + len2
+    # Normalise length score (inverse: shorter is better, scaled to [0,1])
+    # Use smooth exponential to avoid sharp transitions
+    length_score = jnp.exp(-0.05 * total_len)
     
-    # Compute cancellation potential (pairs of generator and its inverse)
-    def compute_cancellation(relator):
-        # For each position, check if current element is inverse of next element
-        # This captures direct cancellation opportunities
-        shifted = jnp.roll(relator, -1)
-        # Create mask for valid positions (avoid padding and boundary wrap issues)
-        valid_mask = (relator != 0) & (shifted != 0)
-        # Check for cancellation (a, -a) pairs
-        cancellations = jnp.sum((relator + shifted == 0) & valid_mask)
-        return cancellations
+    # Cancellation potential: count adjacent inverse pairs in each relator
+    # For r1: check (r1[i] + r1[i+1]) == 0 for i in 0..len_r1-2
+    def count_cancellations(relator):
+        rel = relator[:MAX_RELATOR_LENGTH]
+        # Create shifted versions (left and right)
+        left = rel[:-1]
+        right = rel[1:]
+        # Check inverse pairs: x + (-x) = 0
+        inv_check = (left + right) == 0
+        # Only count valid (non-zero) pairs
+        valid = (left != 0) & (right != 0)
+        return jnp.sum(inv_check & valid)
     
-    # Also check for palindromic symmetry within relators
-    def compute_symmetry(relator, length):
-        # Create reverse version of the non-zero prefix
-        indices = jnp.arange(36)
-        rev_indices = jnp.flip(indices)
-        rev_relator = relator[rev_indices]
-        
-        # Only compare within active length
-        mask = indices < length
-        # Compute matching positions
-        matches = jnp.sum((relator == rev_relator) & mask)
-        # Normalize by length to get symmetry score
-        return jnp.where(length > 0, matches / length, 0.0)
+    canc_r1 = count_cancellations(r1)
+    canc_r2 = count_cancellations(r2)
+    total_canc = canc_r1 + canc_r2
     
-    canc1 = compute_cancellation(r1)
-    canc2 = compute_cancellation(r2)
-    total_cancellation = canc1 + canc2
+    # Normalise cancellation score (logarithmic scaling to prevent saturation)
+    canc_score = jnp.arctan(0.3 * total_canc) / (jnp.pi / 2)
     
-    # Compute symmetry scores
-    sym1 = compute_symmetry(r1, len1)
-    sym2 = compute_symmetry(r2, len2)
-    avg_symmetry = (sym1 + sym2) / 2.0
+    # Symmetry score: measure palindromic structure in relators
+    def symmetry_score(relator):
+        rel = relator[:MAX_RELATOR_LENGTH]
+        length = jnp.sum(rel != 0)
+        # Consider only up to length//2 elements for comparison
+        half = jnp.minimum(18, length // 2)
+        # Extract relevant prefix and suffix (reversed)
+        prefix = rel[:half]
+        suffix = jnp.flip(rel[length - half:length]) if length > 0 else jnp.zeros_like(prefix)
+        # Compare prefix with reversed suffix (account for inverses)
+        # Check if prefix[i] == -suffix[i] for palindromic relator (r[i] == r[n-1-i]^{-1})
+        symmetry = (prefix + suffix) == 0
+        valid_sym = (prefix != 0) | (suffix != 0)
+        if half == 0:
+            return 1.0
+        return jnp.sum(symmetry & valid_sym) / half
     
-    # Detect repeated substrings (simplified: count occurrences of same-length patterns)
-    def count_repeats(relator, length):
-        # Look for short repeated patterns (length 2 and 3)
-        if length < 4:
-            return 0.0
-        # Count matching adjacent pairs (simplified pattern detection)
-        pairs = relator[:-1] * 3 + relator[1:]  # encode pairs uniquely
-        shifted_pairs = jnp.roll(pairs, 1)
-        valid_mask = jnp.arange(36) < (length - 1)
-        repeat_count = jnp.sum((pairs == shifted_pairs) & valid_mask)
-        return repeat_count
+    sym_r1 = symmetry_score(r1)
+    sym_r2 = symmetry_score(r2)
+    avg_sym = (sym_r1 + sym_r2) / 2.0
     
-    rep1 = count_repeats(r1, len1)
-    rep2 = count_repeats(r2, len2)
-    total_repeats = rep1 + rep2
+    # Balance score: ratio of generator count to inverse count per relator (should be ~1)
+    def balance_score(relator):
+        rel = relator[:MAX_RELATOR_LENGTH].astype(jnp.int32)
+        # Count positive and negative generators separately
+        pos_count = jnp.sum(rel > 0)
+        neg_count = jnp.sum(rel < 0)
+        # Use harmonic mean-like balance: 2 / (r + 1/r) where r = max(pos/neg, neg/pos)
+        ratio = jnp.where(pos_count == 0, 0.0, 
+                         jnp.where(neg_count == 0, 0.0,
+                                   jnp.minimum(pos_count, neg_count) / jnp.maximum(pos_count, neg_count)))
+        return ratio
     
-    # Generators usage balance: penalize if one relator uses only one generator
-    def generator_balance(relator):
-        # Check if both generators 1 and 2 appear (abs value)
-        uses_gen1 = jnp.any(jnp.abs(relator) == 1)
-        uses_gen2 = jnp.any(jnp.abs(relator) == 2)
-        return jnp.where(uses_gen1 & uses_gen2, 1.0, 0.0)
+    bal_r1 = balance_score(r1)
+    bal_r2 = balance_score(r2)
+    avg_bal = (bal_r1 + bal_r2) / 2.0
     
-    balance1 = generator_balance(r1)
-    balance2 = generator_balance(r2)
-    balance_score = (balance1 + balance2) / 2.0
-    
-    # Normalize total length (penalize very long presentations)
-    # Using sigmoid-like decay with offset
-    length_penalty = jnp.exp(-0.05 * total_len)
-    
-    # Combine components with weights (heuristic tuning)
-    # Higher weight on cancellation potential (most direct path to trivialization)
-    # Normalize components
-    max_cancellation = 18.0  # approximate max possible (36/2 per relator)
-    max_repeats = 10.0
-    
-    normalized_cancellation = jnp.minimum(total_cancellation / max_cancellation, 1.0)
-    normalized_repeats = jnp.minimum(total_repeats / max_repeats, 1.0)
-    
-    # Final weighted combination
-    score = (
-        0.4 * normalized_cancellation +
-        0.2 * avg_symmetry +
-        0.2 * normalized_repeats +
-        0.1 * balance_score +
-        0.1 * length_penalty
+    # Combine scores with weights (optimized heuristically for trivialisation paths)
+    # Emphasise cancellation and symmetry heavily as they indicate structural potential
+    total_score = (
+        0.15 * length_score +
+        0.45 * canc_score +
+        0.20 * avg_sym +
+        0.20 * avg_bal
     )
     
-    # Clamp to [0,1]
-    return jnp.clip(score, 0.0, 1.0)
+    # Ensure bounded to [0,1]
+    return jnp.clip(total_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1733,24 +1695,34 @@ def heuristic_fn_v14(presentation: jnp.ndarray) -> float:
 ## Request 16
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v15`.
 
-**Latency:** 19.833 s
+**Latency:** 22.136 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic that can detect "structure" or "potential for cancellation" even in long presentations, since the baseline (just length) is insufficient.
 
+The key insight is that we need to measure:
+1. How close the presentation is to being trivial (short relators, especially identity)
+2. Potential for future cancellation (syntactic structure that suggests simplification is possible)
+3. Balance between relators (they should be similar in structure for potential cancellation)
+
+Here's my approach for v15:
+- Detect cancellation opportunities by counting adjacent inverse pairs within each relator
+- Check for palindromic structure (common in trivial group presentations)
+- Measure how close each relator is to being the identity
+- Include a term for presentation length but with careful normalization to avoid penalizing necessary growth during search
+- Add structural symmetry terms between the two relators
+
+```python
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v15(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic that captures structural properties conducive to trivialisation:
-    1. Encourages cancellation patterns by counting matching generator-inverse pairs
-       within each relator (including across the two halves of a relator, simulating
-       reduction opportunities).
-    2. Rewards symmetry (palindromic structure with sign-flipped inversion) which 
-       often arises in reducible presentations.
-    3. Penalises long runs of identical generators (which reduce cancellation potential).
-    4. Normalises to [0,1] via sigmoid-like scaling to avoid extreme values.
+    r"""
+    Enhanced heuristic that detects cancellation potential, structural symmetry,
+    and proximity to trivial presentation. Uses multiple signal components:
+    - Cancellation pairs (adjacent inverses)
+    - Palindromic structure
+    - Relator similarity
+    - Normalized length with soft ceiling
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -1760,91 +1732,87 @@ def heuristic_fn_v15(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # [EVOLVE-BLOCK-START]
-
-    # Split into two relators (each up to 36 symbols)
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
     
-    # Get active (non-padding) parts
-    mask1 = r1 != 0
-    mask2 = r2 != 0
-    r1_active = jnp.where(mask1, r1, 0)
-    r2_active = jnp.where(mask2, r2, 0)
+    # Split into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Compute lengths (number of non-zero entries)
-    len1 = jnp.sum(mask1)
-    len2 = jnp.sum(mask2)
-    
-    # Helper: count direct cancellation pairs (a, -a) at same position in two halves
-    # of the same relator (simulates adjacent reduction)
+    # Helper to compute cancellation pairs (adjacent inverse pairs)
     def count_cancellation_pairs(relator):
-        # Pad with zeros to allow circular comparison (wrap-around)
-        padded = jnp.concatenate([relator, relator])
-        # Check adjacent pairs (i, i+1) for cancellation: a and -a
-        # Compare element i with negative of element i+1
-        shifted = jnp.roll(padded, -1)
-        cancel_mask = (padded[:-1] != 0) & (shifted[:-1] != 0) & (padded[:-1] == -shifted[:-1])
-        return jnp.sum(cancel_mask.astype(jnp.float32))
+        # Pad with 0 on both sides to handle edge cases
+        padded = jnp.concatenate([jnp.array([0]), relator, jnp.array([0])])
+        # Check for inverse pairs: adjacent elements that sum to 0
+        return jnp.sum((padded[:-1] + padded[1:]) == 0)
     
-    # Also check cross-relator cancellation potential: count matching symbols in r1 and r2
-    # with opposite signs, indicating potential for conjugation-based simplification
-    cross_match = jnp.sum((r1_active != 0) & (r2_active != 0) & (r1_active == -r2_active))
+    # Helper to check palindromic structure (symmetric around center)
+    def palindromic_score(relator):
+        # Get non-padded portion
+        mask = relator != 0
+        length = jnp.sum(mask)
+        
+        # If empty, perfect palindrome
+        def empty_case():
+            return 1.0
+        
+        def nonempty_case():
+            # Get actual elements
+            actual = relator[:length]
+            # Reverse and compare
+            reversed_actual = actual[::-1]
+            matches = jnp.sum(actual == reversed_actual)
+            return matches / length
+        
+        return jax.lax.cond(length == 0, empty_case, nonempty_case)
     
-    # Palindrome score: count positions where relator[i] == -relator[L-1-i]
-    def pal_score(relator, mask):
-        rev_relator = jnp.flip(relator * (mask.astype(jnp.int32)))
-        # Only compare within active region
-        L = jnp.sum(mask).astype(jnp.int32)
-        # Mask to only first L positions in both original and reversed
-        iotas = jnp.arange(36)
-        within_L = iotas < L
-        match = (relator == -rev_relator) & within_L & (relator != 0) & (rev_relator != 0)
-        return jnp.sum(match.astype(jnp.float32))
+    # Compute components for both relators
+    c1 = count_cancellation_pairs(r1)
+    c2 = count_cancellation_pairs(r2)
+    p1 = palindromic_score(r1)
+    p2 = palindromic_score(r2)
     
-    pal1 = pal_score(r1, mask1)
-    pal2 = pal_score(r2, mask2)
-    total_pal = pal1 + pal2
+    # Length-based components (with soft penalty for very long presentations)
+    len1 = jnp.sum(r1 != 0)
+    len2 = jnp.sum(r2 != 0)
     
-    # Run penalty: count positions where consecutive same generators appear (more than 2 in a row)
-    def run_penalty(relator, mask):
-        # Only consider non-zero entries, and pad with zeros for boundary
-        rel_nonzero = relator * (mask.astype(jnp.int32))
-        # Compare with shifted versions
-        s1 = jnp.roll(rel_nonzero, -1)
-        s2 = jnp.roll(rel_nonzero, -2)
-        # Count runs of 3 or more: positions where val == s1 == s2 != 0
-        triple_run = (rel_nonzero != 0) & (rel_nonzero == s1) & (rel_nonzero == s2)
-        return jnp.sum(triple_run.astype(jnp.float32))
+    # Normalized length (with soft ceiling using sigmoid-like function)
+    def soft_length_score(total_len):
+        # Score decreases with length but with diminishing returns
+        # Using: 1 / (1 + (length/10)^2) scaled to [0,1]
+        return 1.0 / (1.0 + (total_len / 10.0) ** 2)
     
-    run_p1 = run_penalty(r1, mask1)
-    run_p2 = run_penalty(r2, mask2)
-    total_run = run_p1 + run_p2
+    length_score = soft_length_score(len1 + len2)
     
-    # Total cancellation potential
-    canc1 = count_cancellation_pairs(r1)
-    canc2 = count_cancellation_pairs(r2)
-    total_canc = canc1 + canc2 + cross_match
+    # Check if relators are trivial (length 0)
+    trivial_score = 0.0
+    if len1 == 0 and len2 == 0:
+        trivial_score = 1.0
     
-    # Normalize components to [0,1] ranges roughly
-    # Use soft normalization (divide by max reasonable counts)
-    norm_canc = jnp.clip(total_canc / 20.0, 0.0, 1.0)
-    norm_pal = jnp.clip(total_pal / 12.0, 0.0, 1.0)
-    norm_run = jnp.clip(total_run / 5.0, 0.0, 1.0)
+    # Similarity between relators (normalized edit distance approximation)
+    def similarity():
+        min_len = jnp.minimum(len1, len2)
+        max_len = jnp.maximum(len1, len2)
+        # Simple character overlap score
+        overlap = jnp.sum((r1[:min_len] == r2[:min_len]) & (r1[:min_len] != 0))
+        return overlap / max_len if max_len > 0 else 0.0
     
-    # Base score: prefer shorter presentations but offset by structural scores
-    total_len = len1 + len2
-    base_score = jnp.clip(1.0 - total_len / 72.0, 0.0, 1.0)
+    similarity_score = jax.lax.cond((len1 > 0) | (len2 > 0), similarity, lambda: 0.0)
     
-    # Combine: weighted sum where structural features are important
-    score = 0.3 * base_score + 0.35 * norm_canc + 0.25 * norm_pal - 0.1 * norm_run
+    # Combine components with weights (learned or heuristic-tuned)
+    # Emphasize cancellation potential and palindromic structure as signs of 
+    # underlying group-theoretic simplicity
+    score = (
+        0.3 * length_score +
+        0.2 * (c1 + c2) / 4.0 +  # Normalize cancellation pairs (max 2 per relator typically)
+        0.15 * (p1 + p2) / 2.0 +
+        0.15 * similarity_score +
+        0.2 * trivial_score
+    )
     
-    # Ensure in [0,1] via soft clipping (clamp with sigmoid-like smoothness isn't needed here)
-    score = jnp.clip(score, 0.0, 1.0)
-    
-    return score
-
-    # [EVOLVE-BLOCK-END]
+    # Clamp to [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1853,101 +1821,104 @@ def heuristic_fn_v15(presentation: jnp.ndarray) -> float:
 ## Request 17
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v16`.
 
-**Latency:** 15.087 s
+**Latency:** 20.145 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v16(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that balances current length reduction with structural cues 
-    indicating high potential for cancellation. It computes:
-    1. Normalized current length (lower is better) as baseline.
-    2. Number of adjacent cancellation pairs (e.g., [1, -1] or [-2, 2]) within each relator.
-    3. Presence of palindromic structure, which often indicates symmetries exploitable 
-       by AC moves.
-    4. A penalty for imbalance in relator lengths to encourage symmetric simplification.
+    r"""
+    Modified heuristic incorporating:
+    1. Normalized cancellation potential (count of adjacent inverse pairs within each relator)
+    2. Palindromic structure detection (symmetry suggests potential for simplification)
+    3. Relator balance metric (similarity in length and structure between relators)
+    4. Identity bias: strong penalty for non-zero padding (incomplete presentations)
     
-    All components are normalized and combined into a bounded [0,1] score.
+    This heuristic better captures structural properties that indicate potential for
+    successful trivialization, especially for presentations that must temporarily grow
+    before shrinking (addressing the AC conjecture's long traversal paths).
     
     Args:
-        presentation: Array representing current group presentation as concatenated relators.
-            Shape (72,) int32. 0 is padding.
+        presentation: Array representing current group presentation in terms of relators
+            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
     
     Returns:
-        Scalar heuristic value in [0,1] estimating trivialization potential (higher is better).
+        Scalar heuristic value in [0,1] estimating likelihood of trivialisation.
     """
-    # [EVOLVE-BLOCK-START]
-
-    # Split presentation into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Compute active length for each relator (non-zero entries)
-    len1 = jnp.sum(jnp.abs(r1) > 0)
-    len2 = jnp.sum(jnp.abs(r2) > 0)
-    total_len = len1 + len2
+    # Split into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Normalize length term to [0, 1]: 0 for trivial (len=2), 1 for max (len=72)
-    norm_len = jnp.clip(total_len / 72.0, 0.0, 1.0)
-    length_score = 1.0 - norm_len
-    
-    # Count adjacent cancellation pairs in each relator
-    # For relator r, count pairs (r[i], r[i+1]) where r[i] = -r[i+1]
+    # 1. Cancellation potential: count inverse pairs (adjacent x, x^-1)
     def count_cancellations(relator):
-        # Shifted version for pairing
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check adjacent pairs: r[i] == -r[i+1] and both non-zero
-        cancel_mask = (relator != 0) & (shifted != 0) & (relator == -shifted)
-        return jnp.sum(cancel_mask)
+        # Create shifted versions for adjacent comparison
+        shifted = jnp.roll(relator, -1)
+        # Check for inverse pairs (x, -x) ignoring zeros
+        non_zero_mask = (relator != 0) & (shifted != 0)
+        inverse_pairs = (relator == -shifted)
+        return jnp.sum(non_zero_mask & inverse_pairs)
     
-    cancel1 = count_cancellations(r1)
-    cancel2 = count_cancellations(r2)
-    total_cancels = cancel1 + cancel2
+    cancels_r1 = count_cancellations(r1)
+    cancels_r2 = count_cancellations(r2)
     
-    # Normalize cancellation score (max ~36 per relator, but realistically ~10-20)
-    max_cancels = 36.0
-    cancel_score = jnp.clip(total_cancels / max_cancels, 0.0, 1.0)
+    # 2. Palindromic score: symmetry within each relator
+    def palindromic_score(relator):
+        reversed_r = jnp.flip(relator)
+        # Compare only non-zero positions
+        valid_mask = (relator != 0) | (reversed_r != 0)
+        matches = (relator == reversed_r)
+        return jnp.sum(valid_mask & matches) / jnp.maximum(jnp.sum(valid_mask), 1.0)
     
-    # Palindrome detection: count matching elements at symmetric positions
-    # Only up to the active length for each relator
-    def palindrome_score(relator, length):
-        # Truncate to actual length for symmetry check
-        truncated = relator[:length]
-        # Pad to even length for symmetric comparison (no-op if length is even)
-        half_len = length // 2
-        left = truncated[:half_len]
-        right_rev = truncated[length - half_len:][::-1]
-        matches = jnp.sum(left == right_rev)
-        # Normalize by half-length
-        denom = jnp.maximum(half_len, 1)
-        return matches / denom
+    palin_r1 = palindromic_score(r1)
+    palin_r2 = palindromic_score(r2)
     
-    pal1 = palindrome_score(r1, len1.astype(jnp.int32))
-    pal2 = palindrome_score(r2, len2.astype(jnp.int32))
-    pal_score = (pal1 + pal2) / 2.0
+    # 3. Relator length balance
+    r1_len = jnp.sum(r1 != 0)
+    r2_len = jnp.sum(r2 != 0)
+    total_len = r1_len + r2_len
+    max_len = MAX_PRESENTATION_LENGTH
+    # Normalize to [0,1] with penalty for imbalance
+    avg_len = total_len / 2.0
+    imbalance = jnp.abs(r1_len - r2_len) / jnp.maximum(avg_len, 1.0)
+    balance_score = 1.0 - imbalance
     
-    # Length imbalance penalty: prefer similar-length relators for easier balancing
-    length_diff = jnp.abs(len1 - len2)
-    max_len_diff = 36.0
-    imbalance_score = 1.0 - jnp.clip(length_diff / max_len_diff, 0.0, 1.0)
+    # 4. Padding integrity (penalize accidental padding inside relators)
+    # This detects if a relator is "truncated" in an unnatural way
+    def padding_score(relator):
+        # Count non-zero elements followed by zero (trailing padding is fine)
+        non_zero_to_zero = (relator[:-1] != 0) & (relator[1:] == 0)
+        # Count total non-zero elements
+        total_non_zero = jnp.sum(relator != 0)
+        return jnp.sum(non_zero_to_zero) / jnp.maximum(total_non_zero, 1.0)
     
-    # Combine scores with weights tuned for early-stage exploration and cancellation potential
-    w_len = 0.25
-    w_cancel = 0.4
-    w_pal = 0.2
-    w_imb = 0.15
+    pad_penalty_r1 = padding_score(r1)
+    pad_penalty_r2 = padding_score(r2)
     
-    score = (w_len * length_score + w_cancel * cancel_score + 
-             w_pal * pal_score + w_imb * imbalance_score)
+    # Combine components with weights reflecting their importance
+    # Prioritize cancellation potential and balance, with palindromic and padding as secondary
+    cancellation_score = (cancels_r1 + cancels_r2) / 2.0
+    normalized_cancellation = jnp.clip(cancellation_score / 4.0, 0.0, 1.0)  # cap at 8 inverse pairs max
+    composite_score = (
+        0.4 * normalized_cancellation +
+        0.2 * (palin_r1 + palin_r2) / 2.0 +
+        0.2 * balance_score +
+        0.1 * (1.0 - jnp.mean([pad_penalty_r1, pad_penalty_r2]))
+    )
     
-    # Final clamp to [0,1]
-    return jnp.clip(score, 0.0, 1.0)
-
-    # [EVOLVE-BLOCK-END]
+    # Bonus for trivial presentations (both relators empty or identity)
+    is_trivial = (total_len == 0)
+    trivial_bonus = 0.1 * is_trivial
+    
+    # Normalize to [0, 1] range with bonus
+    final_score = jnp.clip(composite_score + trivial_bonus, 0.0, 1.0)
+    
+    return final_score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -1956,97 +1927,137 @@ def heuristic_fn_v16(presentation: jnp.ndarray) -> float:
 ## Request 18
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v17`.
 
-**Latency:** 14.842 s
+**Latency:** 27.850 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic for the AC move search problem. The key challenge is that intermediate presentations can grow very large during the trivialisation process, so naive length-based heuristics are insufficient.
 
-def heuristic_fn_v17(presentation: jnp.ndarray) -> float:
+The heuristic needs to detect "structure" or "potential for cancellation" even in long presentations. Key insights from group theory and the AC moves:
+
+1. **Cancellation potential**: We want to identify pairs of generators and their inverses that could cancel out
+2. **Symmetry/palindromic structure**: Relators that are close to being palindromes might be easier to simplify
+3. **Generator balance**: Balanced numbers of generators and their inverses suggest potential for cancellation
+4. **Repetition patterns**: Recurring substrings might indicate simplifiable structure
+
+Let me design a heuristic that combines:
+- Normalized presentation length (but not as the primary factor)
+- Generator/inverse balance for each relator
+- Evidence of potential cancellation pairs
+- Detection of repeating patterns that might indicate simplifiability
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic based on multiple structural properties:
+    - Generator balance (near-zero net exponent for each generator per relator)
+    - Cancellation potential (adjacent inverse pairs)
+    - Palindromic structure detection
+    - Relative length compared to maximum
+    
+    This heuristic identifies presentations that have structural properties suggesting
+    they are close to being trivializable, even if they appear long due to intermediate
+    expansions in the AC move process.
     """
-    Enhanced heuristic that captures structural features promising for trivialisation.
-    Combines:
-    1. Normalized presentation length (shorter is better)
-    2. Cancellation potential: counts complementary adjacent pairs (e.g., [1, -1])
-    3. Palindromic symmetry: measures symmetry within each relator
-    4. Generator balance: encourages balanced occurrence counts of generators and inverses
-    
-    The score is a weighted combination of these features, normalized to [0,1].
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
     # Split presentation into two relators
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper function to process a single relator
-    def relator_stats(relator):
-        # Identify non-padding positions
-        padding_mask = relator != 0
-        # Extract active part
-        active = jnp.where(padding_mask, relator, 0)
-        length = jnp.sum(padding_mask)
+    # Function to compute properties for a single relator
+    def relator_properties(relator):
+        # Get non-padding elements
+        is_padding = (relator == 0)
+        valid_mask = ~is_padding
+        valid_len = jnp.sum(valid_mask)
         
-        # Count cancellation pairs (adjacent complementary elements)
-        left_part = active[:-1]
-        right_part = active[1:]
-        cancel_pairs = jnp.sum((left_part + right_part == 0) * (left_part != 0))
+        # For length > 0
+        def length_positive():
+            # Extract actual elements (non-zero)
+            relator_elements = jnp.where(valid_mask, relator, 0)
+            
+            # Generator balance: sum of exponents for each generator
+            # generator 1: +1 for 1, -1 for -1; generator 2: +1 for 2, -1 for -2
+            gen1_sum = jnp.sum(jnp.where(relator_elements == 1, 1, 0))
+            gen1_sum -= jnp.sum(jnp.where(relator_elements == -1, 1, 0))
+            gen2_sum = jnp.sum(jnp.where(relator_elements == 2, 1, 0))
+            gen2_sum -= jnp.sum(jnp.where(relator_elements == -2, 1, 0))
+            
+            # Balance score: preference for balanced exponents (closer to 0)
+            balance_score = 1.0 - (jnp.abs(gen1_sum) + jnp.abs(gen2_sum)) / (valid_len + 1e-8)
+            balance_score = jnp.clip(balance_score, 0.0, 1.0)
+            
+            # Cancellation potential: count adjacent inverse pairs
+            def count_inversions(arr):
+                # Create shifted version for comparison
+                shifted = jnp.concatenate([arr[1:], jnp.array([0])])
+                # Count where adjacent elements are inverses (x and -x)
+                inv1 = jnp.sum(jnp.where((arr[:-1] == 1) & (shifted[:-1] == -1), 1, 0))
+                inv2 = jnp.sum(jnp.where((arr[:-1] == -1) & (shifted[:-1] == 1), 1, 0))
+                inv3 = jnp.sum(jnp.where((arr[:-1] == 2) & (shifted[:-1] == -2), 1, 0))
+                inv4 = jnp.sum(jnp.where((arr[:-1] == -2) & (shifted[:-1] == 2), 1, 0))
+                return inv1 + inv2 + inv3 + inv4
+            
+            # Also check wrap-around for potential cyclic cancellations
+            def count_wrap_inversions(arr):
+                first = arr[0]
+                last = arr[-1]
+                wrap_inv = 0
+                wrap_inv += jnp.where((first == 1) & (last == -1), 1, 0)
+                wrap_inv += jnp.where((first == -1) & (last == 1), 1, 0)
+                wrap_inv += jnp.where((first == 2) & (last == -2), 1, 0)
+                wrap_inv += jnp.where((first == -2) & (last == 2), 1, 0)
+                return wrap_inv
+            
+            cancel_potential = count_inversions(relator_elements)
+            wrap_cancel = count_wrap_inversions(relator_elements)
+            cancellation_score = 1.0 - jnp.exp(-0.5 * (cancel_potential + wrap_cancel))
+            
+            # Palindrome check: compare element[i] with -element[-1-i]
+            def is_palindrome_like(arr):
+                n = valid_len.astype(jnp.float32)
+                rev_arr = arr[::-1]
+                neg_rev_arr = -rev_arr
+                matches = jnp.sum(jnp.where(arr == neg_rev_arr, 1, 0))
+                return matches / (n + 1e-8)
+            
+            pal_score = jnp.where(valid_len > 0, is_palindrome_like(relator_elements), 0.0)
+            
+            # Normalized length component
+            length_score = 1.0 - (valid_len / MAX_RELATOR_LENGTH)
+            length_score = jnp.clip(length_score, 0.0, 1.0)
+            
+            # Combine scores with weights
+            # Balance and cancellation are most important
+            score = 0.4 * balance_score + 0.3 * cancellation_score + 0.2 * pal_score + 0.1 * length_score
+            return score, valid_len
         
-        # Check palindromic property: compare element at i with element at (length-1-i)
-        # Only consider non-padding elements
-        rev_active = jnp.where(padding_mask, jnp.flip(relator), 0)
-        palindrome_matches = jnp.sum((active == rev_active) * padding_mask)
-        palindrome_score = jnp.where(length > 0, palindrome_matches / length, 0.0)
+        # For empty relator
+        def length_zero():
+            return jnp.array(1.0), jnp.array(0.0)
         
-        # Generator balance: how balanced are positive/negative occurrences?
-        # Count each generator type
-        g1_pos = jnp.sum(active == 1)
-        g1_neg = jnp.sum(active == -1)
-        g2_pos = jnp.sum(active == 2)
-        g2_neg = jnp.sum(active == -2)
-        
-        total_g1 = g1_pos + g1_neg
-        total_g2 = g2_pos + g2_neg
-        
-        # Balance score: 1 if equal positive and negative counts for each generator, 0 otherwise
-        balance_g1 = jnp.where(total_g1 > 0, 1 - jnp.abs(g1_pos - g1_neg) / total_g1, 1.0)
-        balance_g2 = jnp.where(total_g2 > 0, 1 - jnp.abs(g2_pos - g2_neg) / total_g2, 1.0)
-        balance_score = (balance_g1 + balance_g2) / 2.0
-        
-        return length, cancel_pairs, palindrome_score, balance_score
+        return jax.lax.cond(valid_len > 0, length_positive, length_zero)
     
-    len1, cp1, pal1, bal1 = relator_stats(r1)
-    len2, cp2, pal2, bal2 = relator_stats(r2)
+    # Process both relators
+    score1, len1 = relator_properties(r1)
+    score2, len2 = relator_properties(r2)
     
-    total_length = len1 + len2
-    total_cancel_pairs = cp1 + cp2
-    avg_palindrome = (pal1 + pal2) / 2.0
-    avg_balance = (bal1 + bal2) / 2.0
+    # Combined length component
+    total_len = len1 + len2
+    length_factor = 1.0 - (total_len / MAX_PRESENTATION_LENGTH)
+    length_factor = jnp.clip(length_factor, 0.0, 1.0)
     
-    # Normalize length component: score is high for short lengths, specifically ideal is total_length=2 (trivial group)
-    max_possible_length = 2 * MAX_RELATOR_LENGTH
-    length_score = 1.0 - jnp.minimum(total_length / max_possible_length, 1.0)
+    # Final combined score: focus on balance and cancellation more than length
+    base_score = 0.35 * score1 + 0.35 * score2 + 0.15 * length_factor
+    base_score += 0.15 * (1.0 - jnp.tanh(total_len / 20.0))  # Extra penalty for very long presentations
     
-    # Normalize cancellation pairs: capped at reasonable value
-    max_pairs_per_relator = MAX_RELATOR_LENGTH - 1
-    max_total_pairs = 2 * max_pairs_per_relator
-    cancel_score = jnp.minimum(total_cancel_pairs / max_total_pairs, 1.0)
-    
-    # Combine all components with weights tuned to emphasize structural properties
-    # Weights: length (0.3), cancellation (0.3), palindrome (0.2), balance (0.2)
-    score = 0.3 * length_score + 0.3 * cancel_score + 0.2 * avg_palindrome + 0.2 * avg_balance
-    
-    return score
+    # Ensure output in [0, 1]
+    return jnp.clip(base_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -2055,108 +2066,109 @@ def heuristic_fn_v17(presentation: jnp.ndarray) -> float:
 ## Request 19
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v18`.
 
-**Latency:** 17.626 s
+**Latency:** 22.344 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v18(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic for measuring the "trivialisability" of a group presentation.
+    r"""
+    Heuristic v18: Improved cancellation-aware heuristic combining:
+    (1) Normalized presentation length (lower is better)
+    (2) Expected cancellation potential via local pair counting (adjacent inverse pairs, including across relator boundary)
+    (3) Global symmetry score via reverse-complement matching
+    (4) Generator balance (equal numbers of each generator and its inverse per relator)
     
-    Improvements over v0:
-    1. Consider not only total length but also cancellation potential (adjacent inverse pairs)
-    2. Detect palindromic structure in relators (common in trivial group presentations)
-    3. Penalise high imbalance between relator lengths
-    4. Reward presence of simple patterns like x*x^{-1} or x^2*x^{-2}
-    5. Add soft constraint for symmetry between the two relators
+    These features are combined in a way that prioritizes cancellation potential, especially
+    for long presentations where raw length can be misleading. The design aims to detect
+    hidden cancellable structure even in inflated intermediate states.
     
     Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+        presentation: Array representing current group presentation [r_1; r_2], shape (72,)
     
     Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
+        Scalar heuristic in [0,1] (higher = better, closer to trivial presentation)
     """
-    # [EVOLVE-BLOCK-START]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
     
-    # Split into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    # Split presentation into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Mask for non-padding elements
-    mask1 = r1 != 0
-    mask2 = r2 != 0
+    # Mask for valid (non-padding) elements
+    valid_r1 = r1 != 0
+    valid_r2 = r2 != 0
     
-    # Count actual length of each relator
-    len1 = jnp.sum(mask1)
-    len2 = jnp.sum(mask2)
-    total_len = len1 + len2
+    # Count actual lengths
+    len_r1 = jnp.sum(valid_r1).astype(float)
+    len_r2 = jnp.sum(valid_r2).astype(float)
     
-    # Cancellation potential: count adjacent inverse pairs in each relator
-    # For relator 1: check pairs (i, i+1)
-    inv_pairs1 = jnp.sum((r1[:-1] * r1[1:] < 0) & (jnp.abs(r1[:-1]) == jnp.abs(r1[1:])) & 
-                         mask1[:-1] & mask1[1:])
-    # For relator 2: check pairs (i, i+1)
-    inv_pairs2 = jnp.sum((r2[:-1] * r2[1:] < 0) & (jnp.abs(r2[:-1]) == jnp.abs(r2[1:])) & 
-                         mask2[:-1] & mask2[1:])
-    total_inv_pairs = inv_pairs1 + inv_pairs2
+    # Total length normalization (score: shorter = better, 0 to 1)
+    total_len = len_r1 + len_r2
+    length_score = 1.0 - jnp.clip(total_len / (2 * MAX_RELATOR_LENGTH), a_min=0.0, a_max=1.0)
     
-    # Check for self-inverses (palindromes) - a sign of symmetry that often appears in trivial presentations
-    def is_palindrome_like(relator, mask):
-        # Only compare non-zero elements
-        # Get actual non-zero elements
-        relator_nz = jnp.where(mask, relator, 0)
-        # Check if relator is approximately palindrome: r[i] == -r[n-1-i]
-        n = jnp.sum(mask)
-        # Create indices for reversed sequence
-        idx = jnp.arange(36)
-        rev_idx = 35 - idx
-        rev_relator = jnp.where((mask & (rev_idx < 36)), relator[rev_idx], 0)
-        # For palindrome-like: r[i] = -r[35-i] (ignoring padding)
-        matches = (relator_nz == -rev_relator) | ((relator_nz == 0) & (rev_relator == 0))
-        # Only count matches among non-padding positions
-        palindrome_score = jnp.where(mask, matches, 0)
-        return jnp.sum(palindrome_score) / jnp.maximum(n, 1.0)
+    # 1. Local cancellation potential: count adjacent inverse pairs
+    # Check for adjacent inverse pairs in r1
+    r1_inv_pairs = jnp.sum(
+        (r1[:-1] * r1[1:] == -1) & valid_r1[:-1] & valid_r1[1:]
+    )
+    r2_inv_pairs = jnp.sum(
+        (r2[:-1] * r2[1:] == -1) & valid_r2[:-1] & valid_r2[1:]
+    )
     
-    pal1 = is_palindrome_like(r1, mask1)
-    pal2 = is_palindrome_like(r2, mask2)
-    avg_pal = (pal1 + pal2) / 2.0
+    # Cross-boundary inverse pair (last of r1 and first of r2)
+    cross_inv_pair = jnp.logical_and(
+        valid_r1[-1] & valid_r2[0],
+        r1[-1] * r2[0] == -1
+    ).astype(float)
     
-    # Compute length component (normalized to [0,1] with emphasis on short presentations)
-    # Using exponential decay: best at length=2, decays as length increases
-    # Target: minimal length is 2 (x1, x2)
-    length_score = jnp.exp(-0.1 * (total_len - 2.0))
-    length_score = jnp.clip(length_score, 0.0, 1.0)
+    # 2. Generator-balance score (prefer relators with balanced counts)
+    # Count occurrences of each generator and inverse (1, -1, 2, -2)
+    counts_r1 = jnp.array([
+        jnp.sum(r1 == g) for g in [1, -1, 2, -2]
+    ])
+    counts_r2 = jnp.array([
+        jnp.sum(r2 == g) for g in [1, -1, 2, -2]
+    ])
     
-    # Cancellation pair component: reward existing inverse pairs
-    # Normalise by max possible (length/2)
-    max_pairs = jnp.maximum(total_len / 2.0, 1.0)
-    cancel_score = jnp.clip(total_inv_pairs / max_pairs, 0.0, 1.0)
+    # Balance: max(0, 1 - |#x - #x^{-1}| / length)
+    def balance_score(counts, length):
+        diff = jnp.abs(counts[0] - counts[1]) + jnp.abs(counts[2] - counts[3])
+        max_diff = 2 * MAX_RELATOR_LENGTH  # worst possible imbalance
+        return jnp.clip(1.0 - diff / max_diff, a_min=0.0, a_max=1.0)
     
-    # Palindromic symmetry component
-    pal_score = avg_pal
+    balance_r1 = balance_score(counts_r1, len_r1) if len_r1 > 0 else 1.0
+    balance_r2 = balance_score(counts_r2, len_r2) if len_r2 > 0 else 1.0
     
-    # Length imbalance penalty: penalise when one relator is much longer than the other
-    imbalance = jnp.abs(len1 - len2) / jnp.maximum(jnp.maximum(len1, len2), 1.0)
-    balance_score = 1.0 - imbalance
+    # 3. Palindrome/reverse-complement symmetry score
+    # Compare r1 with reverse(-r1) and r2 with reverse(-r2)
+    def reverse_complement(word):
+        # reverse the word, negate each element, and pad with zeros
+        rev = jnp.flip(word)
+        return jnp.where(word != 0, -rev, 0)
     
-    # Combine components with weights
-    # Heuristic: emphasize cancellation potential and length reduction, with symmetry as secondary
-    final_score = (0.4 * length_score + 
-                   0.35 * cancel_score + 
-                   0.15 * pal_score + 
-                   0.10 * balance_score)
+    r1_rc = reverse_complement(r1)
+    r2_rc = reverse_complement(r2)
     
-    # Ensure bounded between 0 and 1
-    return jnp.clip(final_score, 0.0, 1.0)
+    # Overlap with reversed complement (ignoring padding)
+    r1_sym = jnp.sum((r1 == r1_rc) & valid_r1) / jnp.maximum(len_r1, 1.0)
+    r2_sym = jnp.sum((r2 == r2_rc) & valid_r2) / jnp.maximum(len_r2, 1.0)
     
-    # [EVOLVE-BLOCK-END]
-```
+    # Combine scores with weights
+    cancellation_potential = (r1_inv_pairs + r2_inv_pairs + cross_inv_pair) / jnp.maximum(total_len, 1.0)
+    
+    # Composite score (normalize to [0,1])
+    composite = (
+        0.3 * length_score +
+        0.25 * cancellation_potential +
+        0.2 * (balance_r1 + balance_r2) / 2 +
+        0.25 * (r1_sym + r2_sym) / 2
+    )
+    
+    # Final clamped output
+    return jnp.clip(composite, a_min=0.0, a_max=1.0)
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -2164,111 +2176,144 @@ def heuristic_fn_v18(presentation: jnp.ndarray) -> float:
 ## Request 20
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v19`.
 
-**Latency:** 17.838 s
+**Latency:** 23.853 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v19(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures structural properties relevant to trivialisation:
+    1. Counts cancellation pairs (adjacent inverse pairs within each relator)
+    2. Measures symmetry (palindromic structure indicates potential for conjugation moves)
+    3. Penalizes long runs of the same generator (reduces complexity for AC moves)
+    4. Rewards balanced presentation length ratio between relators (encourages symmetry)
+    
+    This heuristic better identifies presentations that, while longer, have structure 
+    conducive to future cancellation through AC moves (especially AC2 conjugation moves
+    that exploit symmetry).
     """
-    Enhanced heuristic for group presentation trivialisation that captures structural 
-    properties conducive to cancellation. Composed of:
-    1. Length penalty (shorter presentations preferred)
-    2. Cancellation pair detection (adjacent inverse pairs reduce length)
-    3. Palindromic symmetry in relators (suggests potential for simplification)
-    4. Generator balance (equal numbers of each generator/inverse in relator)
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    This heuristic is designed to detect "hidden structure" even in longer presentations
-    that may appear poor by simple length metrics alone.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
     # Split presentation into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper function to compute cancellation pairs and structure metrics for a relator
-    def relator_metrics(relator):
-        # Create shifted versions for adjacent comparison
-        shifted_forward = jnp.roll(relator, 1)
-        shifted_backward = jnp.roll(relator, -1)
-        
-        # Identify adjacent cancellation pairs (x, -x)
-        forward_cancel = (relator != 0) & (shifted_forward != 0) & (relator + shifted_forward == 0)
-        backward_cancel = (relator != 0) & (shifted_backward != 0) & (relator + shifted_backward == 0)
-        # Count unique cancellation pairs (avoid double counting)
-        cancel_pairs = jnp.sum(forward_cancel) // 2 + jnp.sum((relator != 0) & (shifted_forward != 0) & 
-                (relator + shifted_forward == 0) & (relator > shifted_forward))
-        
-        # Measure of symmetry: compare to reverse
-        reversed_relator = jnp.flip(relator)
-        # Consider only non-zero positions for symmetry
+    # Function to count cancellation pairs in a single relator
+    def count_cancellation_pairs(relator):
+        # Create shifted versions: current element and next element
+        shifted = jnp.roll(relator, -1)
+        # Cancellation occurs when element and next are exact inverses (sum to 0)
+        cancellations = jnp.sum(jnp.abs(relator + shifted) == 0)
+        # Also check wrap-around cancellation (last with first)
+        wrap_cancellation = jnp.where(
+            (relator[-1] != 0) & (relator[0] != 0) & (relator[-1] + relator[0] == 0),
+            1, 0
+        )
+        return cancellations + wrap_cancellation
+    
+    # Count cancellations in both relators
+    c1 = count_cancellation_pairs(r1)
+    c2 = count_cancellation_pairs(r2)
+    total_cancellations = c1 + c2
+    
+    # Function to measure palindromic structure
+    def palindromic_score(relator):
+        # Get non-zero elements
         mask = relator != 0
-        symmetry = jnp.sum((relator * mask) == (reversed_relator * mask)) / jnp.maximum(jnp.sum(mask), 1.0)
+        non_zero = jnp.where(mask, relator, 0)
         
-        # Generator balance (count of x1 vs x2, and their inverses)
-        # Count occurrences of 1, -1, 2, -2
-        count_1 = jnp.sum(relator == 1)
-        count_minus1 = jnp.sum(relator == -1)
-        count_2 = jnp.sum(relator == 2)
-        count_minus2 = jnp.sum(relator == -2)
-        total_nonzero = count_1 + count_minus1 + count_2 + count_minus2
-        total_nonzero = jnp.maximum(total_nonzero, 1)
+        # Get actual length
+        length = jnp.sum(mask)
         
-        # Balance score: penalize imbalance in generators
-        gen_balance = 1.0 - jnp.abs((count_1 + count_minus1) - (count_2 + count_minus2)) / total_nonzero
+        if length == 0:
+            return 1.0
         
-        return cancel_pairs, symmetry, gen_balance
+        # Check if palindromic: element[i] should be inverse of element[-i-1]
+        # Reverse the relator and check inverse relationship
+        reversed_relator = jnp.flip(non_zero)
+        inverse_reversed = -reversed_relator
+        
+        # Count matches between original and inverse-reversed
+        matches = jnp.sum(jnp.where(mask, jnp.equal(non_zero, inverse_reversed), 0))
+        return matches / length
     
-    # Compute metrics for both relators
-    cancel_pairs1, symmetry1, gen_balance1 = relator_metrics(relator1)
-    cancel_pairs2, symmetry2, gen_balance2 = relator_metrics(relator2)
+    # Compute palindromic scores for both relators
+    p1 = palindromic_score(r1)
+    p2 = palindromic_score(r2)
+    avg_palindromic = (p1 + p2) / 2.0
     
-    # Aggregate metrics
-    total_cancel_pairs = cancel_pairs1 + cancel_pairs2
-    avg_symmetry = (symmetry1 + symmetry2) / 2
-    avg_gen_balance = (gen_balance1 + gen_balance2) / 2
+    # Function to measure run-length penalties
+    def run_penalty(relator):
+        # Count runs of same generator type
+        mask = relator != 0
+        non_zero = jnp.where(mask, relator, 0)
+        
+        if jnp.sum(mask) == 0:
+            return 0.0
+        
+        # Find where generator changes
+        shifted = jnp.roll(non_zero, 1)
+        changes = jnp.sum(jnp.where(mask, jnp.abs(non_zero - shifted) > 0, 0))
+        # Subtract 1 to get number of runs (first element is always start of a run)
+        runs = changes
+        
+        # Penalize long runs by looking at maximum run length
+        max_run = 1
+        current_run = 1
+        prev = 0
+        
+        for i in range(MAX_RELATOR_LENGTH):
+            if non_zero[i] != 0:
+                if non_zero[i] == prev:
+                    current_run += 1
+                    max_run = jnp.maximum(max_run, current_run)
+                else:
+                    current_run = 1
+                    prev = non_zero[i]
+            else:
+                current_run = 1
+                prev = 0
+        
+        return max_run / 5.0  # Normalize
     
-    # Length computation (non-zero elements)
-    length1 = jnp.sum(relator1 != 0)
-    length2 = jnp.sum(relator2 != 0)
-    total_length = length1 + length2
+    run_p1 = run_penalty(r1)
+    run_p2 = run_penalty(r2)
+    avg_run_penalty = (run_p1 + run_p2) / 2.0
     
-    # Normalize and combine metrics with weights (heuristic parameters)
-    # Target state: total_length=2, max cancellation pairs, high symmetry, balanced generators
+    # Compute presentation length ratio
+    def get_length(relator):
+        return jnp.sum(relator != 0)
     
-    # Length score: exponential decay with length (penalize longer presentations)
-    length_score = jnp.exp(-0.1 * total_length)
+    len1 = get_length(r1)
+    len2 = get_length(r2)
+    total_length = len1 + len2
     
-    # Cancellation score: log-based saturation for many cancellation opportunities
-    cancel_score = jnp.log1p(total_cancel_pairs) / jnp.log1p(36.0)
+    # Penalize extreme imbalance between relator lengths
+    length_ratio = jnp.minimum(len1, len2) / (jnp.maximum(len1, len2) + 1e-6)
     
-    # Symmetry score (already in [0,1])
-    symmetry_score = avg_symmetry
+    # Normalize lengths for comparison
+    length_score = 1.0 - (total_length / MAX_PRESENTATION_LENGTH)
     
-    # Generator balance score (already in [0,1])
-    balance_score = avg_gen_balance
-    
-    # Combine scores with weights that emphasize structural properties over raw length
-    # Weight the structural properties (cancellation, symmetry, balance) higher for complex presentations
-    structural_weight = jnp.minimum(0.8, 0.3 + 0.1 * total_length / 10.0)
-    length_weight = 1.0 - structural_weight
-    
-    # Normalized score combination
-    score = (length_weight * length_score + 
-             structural_weight * (0.4 * cancel_score + 0.3 * symmetry_score + 0.3 * balance_score))
+    # Combine components with weights determined by importance for trivialisation
+    # Base score: high if short and balanced with cancellations and symmetry
+    base_score = (
+        0.2 * (total_cancellations / 4.0) +        # Reward cancellations (max ~8 for 2 relators)
+        0.3 * avg_palindromic +                     # Reward palindromic structure
+        0.1 * length_ratio +                        # Reward balanced lengths
+        0.3 * length_score -                        # Reward short presentation
+        0.1 * avg_run_penalty                       # Penalize long runs
+    )
     
     # Ensure output is in [0,1]
-    return jnp.clip(score, 0.0, 1.0)
+    # Clamp to range [0,1] with soft boundaries
+    score = jnp.clip(base_score, 0.0, 1.0)
+    
+    return score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -2277,21 +2322,34 @@ def heuristic_fn_v19(presentation: jnp.ndarray) -> float:
 ## Request 21
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v20`.
 
-**Latency:** 14.595 s
+**Latency:** 23.191 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem requirements, I need to create a heuristic that captures "structure" or "potential for cancellation" even in long presentations, since intermediate stages may grow very large before trivialization.
 
-def heuristic_fn_v20(presentation: jnp.ndarray) -> float:
-    """
-    Improved heuristic that accounts for:
-    1. Current presentation length (shorter is better)
-    2. Potential for cancellation via adjacent inverse pairs
-    3. Palindromic structure in relators (suggests symmetry amenable to trivialization)
-    4. Balanced generator/inverse counts in each relator
+The key insight is that good presentations should have:
+1. Short length (but not too aggressively since growth is sometimes needed)
+2. High potential for cancellation (balanced generators/inverses, palindromic structure, repeated patterns)
+3. Symmetry between the two relators
+
+Let me create an improved heuristic that:
+- Penalizes long presentations but less severely than baseline
+- Rewards balanced generator/inverse counts (more cancellation potential)
+- Detects palindromic structure within relators
+- Rewards similarity/correlation between the two relators (since trivial group often has symmetric relators)
+- Penalizes "frustrated" generators that appear many times without cancellation
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that balances length minimization with cancellation potential detection.
+    Key improvements:
+    1. Rewards balanced generator/inverse counts within each relator
+    2. Detects palindromic structure (self-cancelling potential)
+    3. Rewards correlation between the two relators
+    4. Uses soft length penalty to avoid local minima
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -2303,88 +2361,86 @@ def heuristic_fn_v20(presentation: jnp.ndarray) -> float:
     """
     MAX_RELATOR_LENGTH = 36
     
-    # Split presentation into two relators
+    # Split into two relators
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Create masks for actual elements (non-padding)
+    # Create masks for valid (non-padding) positions
     mask1 = r1 != 0
     mask2 = r2 != 0
     
-    # Get actual lengths
+    # Lengths of each relator
     len1 = jnp.sum(mask1)
     len2 = jnp.sum(mask2)
     total_len = len1 + len2
     
-    # Normalize length component (0->max_len=72, but realistic max is lower)
-    # Inverse mapping: shorter = better
-    max_possible_len = 72.0
-    length_score = 1.0 - (total_len / max_possible_len)
+    # Normalized total length (0=shortest, 1=longest)
+    norm_len = total_len / 72.0
     
-    # Count cancellation opportunities: adjacent inverse pairs
-    def count_cancellations(relator, mask):
-        # Shift by one position to compare adjacent elements
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        
-        # Check for inverse pairs (a and -a) at adjacent positions
-        is_inverse = (relator[:-1] != 0) & (shifted[:-1] != 0) & (relator[:-1] == -shifted[:-1])
-        return jnp.sum(is_inverse.astype(jnp.float32))
+    # Balance score: how balanced generator/inverse counts are in each relator
+    def relator_balance(relator, mask):
+        # Count positive and negative occurrences separately
+        pos_count = jnp.sum((relator > 0) * mask)
+        neg_count = jnp.sum((relator < 0) * mask)
+        total = pos_count + neg_count
+        balance = jnp.minimum(pos_count, neg_count) / jnp.maximum(total, 1)
+        return balance
     
-    cancel1 = count_cancellations(r1, mask1)
-    cancel2 = count_cancellations(r2, mask2)
-    cancel_score = (cancel1 + cancel2) / 10.0  # normalize by reasonable max
+    balance1 = relator_balance(r1, mask1)
+    balance2 = relator_balance(r2, mask2)
+    avg_balance = (balance1 + balance2) / 2.0
     
-    # Palindromic symmetry score (relators that are close to palindromes suggest structure)
-    def pal_score(relator, mask):
-        # Only consider non-zero elements
-        valid_len = jnp.sum(mask)
-        if valid_len == 0:
-            return 0.0
-        
-        # Get actual elements
-        actual = relator[:valid_len]
-        
-        # Compare to reverse
-        reversed_actual = actual[::-1]
-        matches = jnp.sum(actual == reversed_actual)
-        
-        # Normalize by length
-        return matches / valid_len
+    # Palindrome score: check if relator reads similar forward/backward (for cancellation potential)
+    def palindrome_score(relator, mask):
+        # Only consider non-padding positions
+        len_r = jnp.sum(mask)
+        if len_r == 0:
+            return 1.0
+        # Get non-zero elements
+        indices = jnp.where(mask, jnp.arange(len(relator)), len(relator))
+        valid_indices = jnp.where(mask)
+        # Pad for symmetric comparison
+        non_zero = jnp.where(mask, relator, 0)
+        # Reverse non-zero sequence (simplified: just compare with reversed version using mask)
+        reversed_relator = jnp.where(mask, jnp.flip(relator), 0)
+        # Count matches between forward and reversed (ignoring padding)
+        matches = jnp.sum((non_zero == reversed_relator) * mask)
+        return matches / jnp.maximum(len_r, 1)
     
-    pal1 = pal_score(r1, mask1)
-    pal2 = pal_score(r2, mask2)
-    pal_score_val = (pal1 + pal2) / 2.0
+    pal1 = palindrome_score(r1, mask1)
+    pal2 = palindrome_score(r2, mask2)
+    avg_palindrome = (pal1 + pal2) / 2.0
     
-    # Generator balance: each relator should have equal count of each generator and its inverse
-    def gen_balance_score(relator):
-        # Count occurrences of each generator and its inverse
-        count1 = jnp.sum(relator == 1)
-        count1_inv = jnp.sum(relator == -1)
-        count2 = jnp.sum(relator == 2)
-        count2_inv = jnp.sum(relator == -2)
-        
-        # Penalize imbalance
-        imbalance1 = jnp.abs(count1 - count1_inv)
-        imbalance2 = jnp.abs(count2 - count2_inv)
-        
-        # Normalize by length to get imbalance per position
-        total_nonzero = jnp.sum(relator != 0)
-        if total_nonzero == 0:
-            return 0.0
-        
-        return 1.0 - (imbalance1 + imbalance2) / (2.0 * total_nonzero)
+    # Similarity between relators (high similarity may indicate simpler structure)
+    # Use normalized correlation of padded sequences
+    r1_norm = r1.astype(jnp.float32)
+    r2_norm = r2.astype(jnp.float32)
+    r1_zero = jnp.where(mask1, r1_norm, 0.0)
+    r2_zero = jnp.where(mask2, r2_norm, 0.0)
     
-    balance1 = gen_balance_score(r1)
-    balance2 = gen_balance_score(r2)
-    balance_score = (balance1 + balance2) / 2.0
+    # Dot product similarity (normalized)
+    dot_product = jnp.sum(r1_zero * r2_zero)
+    norm1 = jnp.sqrt(jnp.sum(r1_zero ** 2) + 1e-8)
+    norm2 = jnp.sqrt(jnp.sum(r2_zero ** 2) + 1e-8)
+    similarity = dot_product / (norm1 * norm2)
     
-    # Combine scores with weights
-    score = 0.4 * length_score + 0.2 * cancel_score + 0.2 * pal_score_val + 0.2 * balance_score
+    # Combined heuristic with weights
+    # Shorter is better (1 - normalized_length)
+    # High balance, palindrome, and similarity scores are better
     
-    # Ensure bounded in [0,1]
-    score = jnp.clip(score, 0.0, 1.0)
+    # Weights - prioritize length and balance more heavily
+    w_len = 0.4
+    w_balance = 0.3
+    w_palindrome = 0.2
+    w_similarity = 0.1
     
-    return score
+    score = w_len * (1.0 - norm_len) + w_balance * avg_balance + w_palindrome * avg_palindrome + w_similarity * (similarity + 1.0) / 2.0
+    
+    # Ensure bounded in [0,1] with some margin
+    score = jnp.clip(score, 0.01, 0.99)
+    
+    return float(score)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -2393,100 +2449,100 @@ def heuristic_fn_v20(presentation: jnp.ndarray) -> float:
 ## Request 22
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v21`.
 
-**Latency:** 13.352 s
+**Latency:** 18.976 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v21(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures structural properties indicating potential for
+    cancellation and proximity to triviality. Key improvements over v0:
+    
+    1. Uses a normalized count of *reducible pairs* (adjacent inverse pairs like [1,-1] or [2,-2])
+       which directly contribute to word reduction via relator simplification.
+    2. Penalizes long presentations but with a soft logarithmic scaling to avoid
+       over-penalizing intermediate expansions (which may be necessary).
+    3. Includes a palindrome symmetry score: relators that are palindromic (up to sign)
+       often arise in trivial group presentations and may be more easily reduced.
+    4. Encourages *balanced* relator lengths (closer to each other), as extreme imbalance
+       can hinder MCTS search efficiency.
+    
+    The final score is a linear combination of normalized contributions, each bounded in [0,1].
     """
-    Enhanced heuristic that captures structural properties favorable for trivialisation.
-    
-    Key components:
-    - Counts cancellation pairs (adjacent generator/inverse pairs) within relators
-    - Penalizes long runs of repeated generators (indicating non-cancellation structure)
-    - Rewards symmetry between the two relators (similar patterns may indicate reducibility)
-    - Uses normalized scoring [0,1] where higher scores indicate better structure
-    
-    The heuristic combines these signals in a way that captures potential for
-    future simplification via AC moves, even in longer presentations that may
-    appear complex but contain hidden cancellation patterns.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
-    
-    # Split the presentation into two relators
+
+    # Split relators
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Create mask for non-padding elements
-    mask_r1 = r1 != 0
-    mask_r2 = r2 != 0
+    # Convert to bool mask for non-padding elements
+    mask1 = r1 != 0
+    mask2 = r2 != 0
     
-    # Get actual elements for each relator
-    r1_vals = jnp.where(mask_r1, r1, 0)
-    r2_vals = jnp.where(mask_r2, r2, 0)
+    # Compute actual lengths
+    len1 = jnp.sum(mask1)
+    len2 = jnp.sum(mask2)
+    total_len = len1 + len2
+    max_total = 2 * MAX_RELATOR_LENGTH
+
+    # --- 1. Inverse pair score: count reducible adjacent pairs ---
+    # Shifted versions to detect [x, -x]
+    r1_shift = jnp.roll(r1, -1)
+    r2_shift = jnp.roll(r2, -1)
+    # Mask out padding boundaries
+    r1_valid = mask1 & jnp.roll(mask1, -1)
+    r2_valid = mask2 & jnp.roll(mask2, -1)
+    # Detect inverse pairs: x + y == 0 and x != 0
+    inv_pairs1 = r1_valid & (r1 + r1_shift == 0)
+    inv_pairs2 = r2_valid & (r2 + r2_shift == 0)
+    inv_count = jnp.sum(inv_pairs1) + jnp.sum(inv_pairs2)
     
-    # Compute cancellation pairs within each relator (adjacent pairs that cancel)
-    # For r1: check if r1[i] == -r1[i+1]
-    r1_next = jnp.roll(r1_vals, -1)
-    r1_cancellation = jnp.logical_and(
-        mask_r1,
-        jnp.roll(mask_r1, -1)  # ensure next element is also non-padding
-    ) & (r1_vals == -r1_next)
-    r1_cancellation_count = jnp.sum(r1_cancellation)
+    # Normalize by expected max: each relator can have at most len-1 pairs
+    max_pairs = jnp.maximum(0, len1 - 1) + jnp.maximum(0, len2 - 1)
+    inv_score = jnp.where(max_pairs > 0, inv_count / max_pairs, 1.0)  # if length <=1, assume high score
+
+    # --- 2. Length penalty: logarithmic soft penalty ---
+    # Use log to avoid extreme discounting of long (but useful) intermediate states
+    log_penalty = jnp.log1p(total_len) / jnp.log1p(max_total)
+    length_score = 1.0 - log_penalty
     
-    # For r2
-    r2_next = jnp.roll(r2_vals, -1)
-    r2_cancellation = jnp.logical_and(
-        mask_r2,
-        jnp.roll(mask_r2, -1)
-    ) & (r2_vals == -r2_next)
-    r2_cancellation_count = jnp.sum(r2_cancellation)
+    # --- 3. Palindrome symmetry score ---
+    # Check if each relator is approximately palindrome (case for trivial presentations)
+    def palindrome_sim(relator, mask):
+        # Reverse the relator but keep padding at end
+        rev = jnp.where(mask, relator, 0)[::-1]
+        # Compare non-padded elements
+        n = jnp.sum(mask)
+        if n == 0:
+            return 1.0
+        # Only compare first n elements of original vs reversed
+        valid_sim = jnp.sum((relator[:n] == rev[:n]) | (relator[:n] == -rev[:n]))
+        return valid_sim / n
     
-    total_cancellation = r1_cancellation_count + r2_cancellation_count
+    pal1 = palindrome_sim(r1, mask1)
+    pal2 = palindrome_sim(r2, mask2)
+    pal_score = (pal1 + pal2) / 2.0
     
-    # Compute symmetry measure: count matching non-zero elements at same positions
-    # This captures potential for shared structure that could be eliminated
-    same_sign = (r1_vals == r2_vals) & mask_r1 & mask_r2
-    same_sign_count = jnp.sum(same_sign)
+    # --- 4. Length balance score ---
+    # Prefer relators of similar lengths
+    len_diff = jnp.abs(len1 - len2)
+    balance_score = 1.0 - jnp.minimum(1.0, len_diff / MAX_RELATOR_LENGTH)
     
-    # Compute inverse symmetry (r1[i] == -r2[i])
-    inverse_same = (r1_vals == -r2_vals) & mask_r1 & mask_r2
-    inverse_same_count = jnp.sum(inverse_same)
+    # Combine with weights (heuristic tuning)
+    w_inv = 0.35
+    w_len = 0.25
+    w_pal = 0.25
+    w_bal = 0.15
     
-    # Total symmetry score
-    symmetry_score = same_sign_count + inverse_same_count
-    
-    # Compute length penalty (shorter is generally better, but not absolute)
-    r1_length = jnp.sum(mask_r1)
-    r2_length = jnp.sum(mask_r2)
-    total_length = r1_length + r2_length
-    
-    # Normalize to [0,1] range
-    # Use sigmoid-like scaling for cancellation and symmetry
-    cancellation_normalized = jax.nn.sigmoid(total_cancellation / 5.0)
-    symmetry_normalized = jax.nn.sigmoid(symmetry_score / 8.0)
-    
-    # Length term: prefer shorter presentations, but with diminishing returns
-    # Normalized to [0,1] where length=0 -> 1, length=72 -> ~0.03
-    length_score = jax.nn.sigmoid((72.0 - total_length) / 20.0)
-    
-    # Combined score with weights
-    score = 0.4 * cancellation_normalized + 0.35 * symmetry_normalized + 0.25 * length_score
+    score = (w_inv * inv_score + 
+             w_len * length_score + 
+             w_pal * pal_score + 
+             w_bal * balance_score)
     
     return score
-```
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -2494,22 +2550,27 @@ def heuristic_fn_v21(presentation: jnp.ndarray) -> float:
 ## Request 23
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v22`.
 
-**Latency:** 17.837 s
+**Latency:** 21.315 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
-def heuristic_fn_v22(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that combines multiple structural properties to better estimate the potential for trivialisation.
-    Key improvements:
-    1. Penalizes total presentation length but with diminishing returns for very short presentations
-    2. Rewards cancellation pairs (adjacent generator-inverse pairs) that can be reduced immediately
-    3. Rewards symmetry (palindromic structure) which often indicates potential for simplification
-    4. Rewards presence of subwords that are conjugates or powers that might simplify under AC moves
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures structural properties conducive to trivialisation.
+    Key improvements over length-based baselines:
+    1. Counts *cancellation-ready pairs* (generator followed by its inverse or vice versa)
+       which are prime candidates for AC1/AC2 operations to eliminate.
+    2. Penalizes *repetition of structure* (e.g., palindromic substrings, repeated blocks)
+       which indicate redundant complexity; such structure can be simplified via conjugation.
+    3. Reward *balance* between relators (similarity in length/signature) to encourage
+       symmetries exploitable by AC moves.
+    4. Incorporate *reducer potential* via a lightweight analysis of how many generators
+       can be eliminated in a single pass.
+    
+    This heuristic better reflects potential for future cancellation even in long presentations
+    that may arise during intermediate steps of the trivialisation path.
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -2519,92 +2580,67 @@ def heuristic_fn_v22(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Split the presentation into two relators
+    # Split into two relators
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper to get non-zero length of a relator
-    def get_length(relator):
-        return jnp.sum(jnp.abs(relator) > 0)
+    # Count non-zero elements per relator (actual lengths)
+    len_r1 = jnp.sum(r1 != 0)
+    len_r2 = jnp.sum(r2 != 0)
+    total_len = len_r1 + len_r2
     
-    len1 = get_length(r1)
-    len2 = get_length(r2)
-    total_len = len1 + len2
+    # Normalize length term (0=ideal, 2*36=worst); scale to [0,1] inverted
+    length_score = 1.0 - (total_len / MAX_PRESENTATION_LENGTH)
+    length_score = jnp.maximum(length_score, 0.0)
     
-    # Compute cancellation pairs within each relator
+    # Cancellation pair count: count adjacent inverse pairs (x, -x)
     def count_cancellation_pairs(relator):
-        # Check for adjacent cancellation pairs (x, x^{-1})
-        # We check consecutive pairs [i, i+1]
+        # Pad with 0 on right to avoid edge effects
         shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # A cancellation happens when a[i] = -a[i+1] and both non-zero
-        is_cancellation = (relator != 0) & (shifted != 0) & (relator == -shifted)
-        return jnp.sum(is_cancellation)
+        # Compare elementwise: where relator[i] = -shifted[i] and neither is 0
+        is_inv = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
+        return jnp.sum(is_inv)
     
-    c1 = count_cancellation_pairs(r1)
-    c2 = count_cancellation_pairs(r2)
+    canc_pairs_r1 = count_cancellation_pairs(r1)
+    canc_pairs_r2 = count_cancellation_pairs(r2)
+    canc_pairs_total = canc_pairs_r1 + canc_pairs_r2
     
-    # Compute symmetry (palindromic structure) for each relator
-    def compute_symmetry(relator):
-        # Get the actual length (non-zero length)
-        n = get_length(relator)
-        # Consider only the non-padded prefix
-        relator_prefix = relator[:jnp.minimum(n, MAX_RELATOR_LENGTH)]
-        # Pad to a fixed length for reversal (use actual length for comparison)
-        rev = jnp.flip(relator_prefix)
-        # Compare with original (for palindromic check)
-        matches = relator_prefix == rev
-        return jnp.sum(matches) / jnp.maximum(n, 1)
+    # Normalize cancellation score (max possible = total_len/2)
+    max_canc_pairs = total_len / 2.0
+    canc_score = jnp.where(max_canc_pairs > 0, canc_pairs_total / max_canc_pairs, 0.0)
     
-    sym1 = compute_symmetry(r1)
-    sym2 = compute_symmetry(r2)
+    # Symmetry/balance between relators: prefer similar lengths
+    len_diff = jnp.abs(len_r1 - len_r2)
+    balance_score = 1.0 - jnp.minimum(len_diff / MAX_RELATOR_LENGTH, 1.0)
     
-    # Count common subwords: look for repeated substrings (simplified to first 5 elements)
-    def common_subword_score(r1_in, r2_in):
-        max_common = 0
-        for i in range(1, min(6, int(get_length(r1_in))+1)):
-            sub1 = r1_in[:i]
-            # Check if this subword or its inverse appears in r2
-            for j in range(len(r2_in)):
-                if j + i <= len(r2_in):
-                    sub2 = r2_in[j:j+i]
-                    is_match = jnp.all(sub1 == sub2) | jnp.all(sub1 == -sub2)
-                    max_common = jnp.where(is_match & (sub1[0] != 0), i, max_common)
-        return max_common / 5.0  # Normalize by max subword length considered
+    # Generator usage balance: prefer both generators used in both relators
+    def generator_usage(relator):
+        g1_used = jnp.any(relator == 1) | jnp.any(relator == -1)
+        g2_used = jnp.any(relator == 2) | jnp.any(relator == -2)
+        return g1_used.astype(jnp.int32) + g2_used.astype(jnp.int32)
     
-    common = common_subword_score(r1, r2)
+    g1_usage_r1, g2_usage_r1 = (r1 == 1).any() | (r1 == -1).any(), (r1 == 2).any() | (r1 == -2).any()
+    g1_usage_r2, g2_usage_r2 = (r2 == 1).any() | (r2 == -1).any(), (r2 == 2).any() | (r2 == -2).any()
+    gen_balance_score = (
+        (g1_usage_r1.astype(jnp.int32) & g1_usage_r2.astype(jnp.int32)).astype(jnp.float32) +
+        (g2_usage_r1.astype(jnp.int32) & g2_usage_r2.astype(jnp.float32))
+    ) * 0.5  # 0 to 1
     
-    # Length-based score: prefer short presentations, but with logarithmic scaling to avoid over-penalization
-    # Use exponential decay with base length 2 (optimal) and scale factor
-    # Optimal length is 2 (trivial presentation <x1, x2 : x1, x2>)
-    # Base score: exponential decay from optimal length of 2
-    length_score = jnp.exp(-0.1 * (total_len - 2.0)**2)
-    
-    # Normalized cancellation score (0-1 range)
-    # Maximum possible cancellations per relator is len-1, so normalize
-    max_c1 = jnp.maximum(len1 - 1, 0)
-    max_c2 = jnp.maximum(len2 - 1, 0)
-    max_c = jnp.maximum(max_c1 + max_c2, 1)
-    cancellation_score = (c1 + c2) / max_c
-    
-    # Symmetry score (already normalized 0-1)
-    symmetry_score = (sym1 + sym2) / 2.0
-    
-    # Common subword score (0-1 normalized)
-    common_score = common
-    
-    # Combine all components with weights
-    # Emphasize length but give importance to cancellation and symmetry
+    # Weighted combination: emphasize cancellation and length
+    w_len, w_canc, w_bal, w_gen = 0.3, 0.35, 0.2, 0.15
     score = (
-        0.5 * length_score +
-        0.2 * cancellation_score +
-        0.2 * symmetry_score +
-        0.1 * common_score
+        w_len * length_score +
+        w_canc * canc_score +
+        w_bal * balance_score +
+        w_gen * gen_balance_score
     )
     
-    # Clamp to [0, 1]
-    return jnp.clip(score, 0.0, 1.0)
+    return score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -2613,131 +2649,82 @@ def heuristic_fn_v22(presentation: jnp.ndarray) -> float:
 ## Request 24
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v23`.
 
-**Latency:** 21.036 s
+**Latency:** 17.741 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v23(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic combining:
+    1. Normalized inverse length (shorter is better)
+    2. Cancellation potential: counts matching generator/inverse pairs at symmetrical positions (anticipating cancellation during reductions)
+    3. Palindromic symmetry score (relators that are self-inverse or palindromic indicate structural simplicity)
+    4. Balance score: compares relative lengths of the two relators (closer to equal = better for AC transformations)
+    
+    This heuristic better captures "hidden structure" in long presentations by focusing on
+    cancellation potential and symmetry rather than just raw length, enabling escape from local maxima.
     """
-    Heuristic based on cancellation potential and structural simplicity.
-    
-    Key components:
-    1. Penalize long presentations (scaled to [0,1])
-    2. Reward pairs of opposite elements adjacent or separated by identity padding
-    3. Detect palindromic/sub-palindromic structure which may simplify under AC moves
-    4. Count "reducible patterns" (like x * x^{-1}) and patterns that become reducible after one cancellation step
-    5. Normalize to [0,1] range with high weights on short length and high cancellation potential
-    
-    This heuristic captures both immediate cancellation potential and structural patterns 
-    that may lead to long chains of cancellations under AC moves.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # Constants
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
-    LENGTH_WEIGHT = 0.4
-    CANCELLATION_WEIGHT = 0.35
-    PALINDROME_WEIGHT = 0.25
     
-    # Split into two relators
+    # Extract the two relators (first 36 entries = r1, next 36 = r2)
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Create masks for non-padding positions
-    mask1 = r1 != 0
-    mask2 = r2 != 0
-    len1 = jnp.sum(mask1, dtype=jnp.int32)
-    len2 = jnp.sum(mask2, dtype=jnp.int32)
+    # Create masks for actual elements (non-zero)
+    mask1 = (r1 != 0).astype(jnp.float32)
+    mask2 = (r2 != 0).astype(jnp.float32)
     
-    # 1. Length component: prefer shorter presentations (min 2, max 72)
+    # Compute actual lengths
+    len1 = jnp.sum(mask1)
+    len2 = jnp.sum(mask2)
     total_len = len1 + len2
-    normalized_length = jnp.clip(1.0 - (total_len - 2) / (72 - 2), 0.0, 1.0)
     
-    # 2. Cancellation potential
-    def count_cancellations(relator, mask):
-        # Count direct cancellations: x followed by x^{-1}
-        # Shifted version for adjacency check
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check for x and -x pairs
-        cancel_pairs = (relator * shifted < 0) & (jnp.abs(relator) == jnp.abs(shifted))
-        cancel_count = jnp.sum(cancel_pairs & mask[:-1])
-        
-        # Also consider cancellation with one padding in between (potential in future moves)
-        shifted2 = jnp.concatenate([relator[2:], jnp.array([0, 0])])
-        cancel_with_pad = (relator * shifted2 < 0) & (jnp.abs(relator) == jnp.abs(shifted2)) & mask[:-2]
-        cancel_count += jnp.sum(cancel_with_pad)
-        
-        # Count pairs that could cancel if a cancellation happens elsewhere
-        # (i.e., patterns that become reducible after one cancellation step)
-        # Look for x, y, x^{-1} patterns
-        three_seq = jnp.stack([relator[:-2], relator[1:-1], relator[2:]], axis=1)
-        mask3 = mask[:-2]
-        cancel_three = (three_seq[:,0] * three_seq[:,2] < 0) & (jnp.abs(three_seq[:,0]) == jnp.abs(three_seq[:,2])) & mask3
-        cancel_count += jnp.sum(cancel_three)
-        
-        return cancel_count
+    # Normalized length score (0 = very long, 1 = minimal length of 2)
+    # Minimal possible is 2 (one generator per relator), maximum is 72
+    length_score = jnp.clip(1.0 - (total_len - 2) / 70.0, 0.0, 1.0)
     
-    total_cancel = count_cancellations(r1, mask1) + count_cancellations(r2, mask2)
-    max_cancel = jnp.maximum(len1 + len2 - 1, 0) * 2  # Upper bound
-    cancellation_score = jnp.clip(total_cancel / jnp.maximum(max_cancel, 1), 0.0, 1.0)
-    
-    # 3. Palindrome component: symmetric relators often simplify nicely
-    def palindrome_score(relator, mask):
-        # Only check non-padding portion
-        len_r = jnp.sum(mask, dtype=jnp.int32)
-        if len_r <= 1:
-            return 1.0
-            
-        # Get actual elements
-        indices = jnp.arange(MAX_RELATOR_LENGTH)
-        actual = jnp.where(mask, relator, 0)
+    # Cancellation potential: count pairs where generator[i] == -generator[j]
+    # Check within each relator for potential self-cancellation when the word is reduced
+    def cancellation_score(relator, mask):
+        # Create reversed version for cancellation check (reductions often happen from ends inward)
+        rev_relator = relator[::-1]
+        rev_mask = mask[::-1]
         
-        # Check palindromic structure: r[i] == -r[len-1-i] (for inverses) or r[i] == r[len-1-i]
-        # We count how many positions satisfy r[i] == -r[len-1-i] (anti-palindrome) 
-        # because AC moves often invert relators
-        def anti_palindrome_score():
-            rev_indices = len_r - 1 - indices
-            rev_indices = jnp.clip(rev_indices, 0, MAX_RELATOR_LENGTH - 1)
-            # Get corresponding reversed elements (only consider masked positions)
-            reversed_rel = jnp.where(
-                mask & (rev_indices < len_r),
-                relator[rev_indices],
-                0
-            )
-            # Check for anti-palindrome: r[i] == -r[len-1-i]
-            anti_pal_match = (actual * reversed_rel < 0) & (jnp.abs(actual) == jnp.abs(reversed_rel))
-            return jnp.sum(anti_pal_match & mask) / len_r
-        
-        def palindrome_score():
-            # Check for regular palindrome: r[i] == r[len-1-i]
-            pal_match = (actual == relator[rev_indices]) & (mask & (rev_indices < len_r))
-            return jnp.sum(pal_match & mask) / len_r
-        
-        # Use anti-palindrome (r[i] == -r[len-1-i]) as it's more relevant for group theory (inverse relators)
-        return anti_palindrome_score()
+        # Count matching generator-inverse pairs at symmetric positions
+        same_sign = (relator * rev_relator > 0)
+        inverse_pairs = (relator == -rev_relator) & same_sign
+        # We need actual pairs that are inverses and at valid positions
+        valid_inverse = (relator == -rev_relator) & (mask.astype(bool)) & (rev_mask.astype(bool))
+        return jnp.sum(valid_inverse.astype(jnp.float32)) / jnp.maximum(len1, 1.0)
     
-    pal_score = (palindrome_score(r1, mask1) + palindrome_score(r2, mask2)) / 2.0
+    cancel1 = cancellation_score(r1, mask1)
+    cancel2 = cancellation_score(r2, mask2)
+    cancel_potential = (cancel1 + cancel2) / 2.0
     
-    # Combine components with weights
-    score = (
-        LENGTH_WEIGHT * normalized_length +
-        CANCELLATION_WEIGHT * cancellation_score +
-        PALINDROME_WEIGHT * pal_score
-    )
+    # Palindromic symmetry: check if relator is close to its own inverse (r[i] == -r[n-1-i])
+    def symmetry_score(relator, mask):
+        rev_relator = relator[::-1]
+        inv_rev_relator = -rev_relator
+        # Count matches with inverse-reversed version (palindromic up to sign)
+        valid_sym = (relator == inv_rev_relator) & (mask.astype(bool))
+        return jnp.sum(valid_sym.astype(jnp.float32)) / jnp.maximum(len1, 1.0)
     
-    # Ensure bounded [0,1]
+    sym1 = symmetry_score(r1, mask1)
+    sym2 = symmetry_score(r2, mask2)
+    symmetry = (sym1 + sym2) / 2.0
+    
+    # Balance score: preference for equal-length relators (helps in AC transformations)
+    len_ratio = jnp.minimum(len1, len2) / jnp.maximum(len1, len2)
+    balance_score = jnp.where((len1 == 0) | (len2 == 0), 0.0, len_ratio)
+    
+    # Combine scores with weights (heuristic tuned for group-theoretic structure)
+    # Length is most important, then cancellation potential, symmetry and balance
+    score = 0.4 * length_score + 0.3 * cancel_potential + 0.2 * symmetry + 0.1 * balance_score
+    
     return jnp.clip(score, 0.0, 1.0)
-```
+# [EVOLVE-BLOCK-END]
 
 
 ---
@@ -2745,22 +2732,24 @@ def heuristic_fn_v23(presentation: jnp.ndarray) -> float:
 ## Request 25
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v24`.
 
-**Latency:** 15.290 s
+**Latency:** 23.205 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v24(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures potential for cancellation by:
-    1. Counting immediate cancellation pairs (adjacent generator-inverse pairs)
-    2. Penalizing long runs of same generator (indicating reducibility via relator moves)
-    3. Measuring symmetry (palindromic structure often indicates simplicity)
-    4. Rewarding short presentation length but with diminishing returns
-    5. Accounting for potential to reduce via AC moves by measuring balancedness of generators
+    r"""
+    Enhanced heuristic that captures structural properties conducive to trivialisation:
+    
+    1. Measures cancellation potential: counts matching generator/inverse pairs in the same relator
+       (which can be eliminated via AC2 conjugations)
+    2. Penalises unbalanced generator counts per relator (non-zero net exponent sum suggests non-triviality)
+    3. Encourages symmetry by detecting palindromic structure within relators
+    4. Accounts for length growth potential by normalising against max length
+    
+    These features better identify presentations that may require intermediate expansion before
+    collapse, escaping local maxima that naive length-based heuristics would discard.
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -2770,70 +2759,70 @@ def heuristic_fn_v24(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Split into two relators
-    relator1 = presentation[:MAX_RELATOR_LENGTH]
-    relator2 = presentation[MAX_RELATOR_LENGTH:]
+    # Split presentation into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Helper function to compute cancellation pairs and symmetry for a relator
-    def relator_features(r):
-        # Count non-zero (non-padding) elements
-        length = jnp.sum(jnp.abs(r) > 0)
+    # Helper to extract non-padded elements (non-zero values)
+    def get_relator_info(relator):
+        non_zero = relator != 0
+        length = jnp.sum(non_zero)
+        # Exponent sum for each generator
+        exp_sum_1 = jnp.sum(jnp.where(relator == 1, 1, 0)) - jnp.sum(jnp.where(relator == -1, 1, 0))
+        exp_sum_2 = jnp.sum(jnp.where(relator == 2, 1, 0)) - jnp.sum(jnp.where(relator == -2, 1, 0))
+        # Cancellation potential: count adjacent inverse pairs (r[i] == -r[i+1])
+        adjacent_pairs = relator[:-1] + relator[1:]
+        inv_pairs = jnp.sum(jnp.where(adjacent_pairs == 0, 1, 0))
+        # Palindrome check: compare relator with its reverse
+        reversed_relator = jnp.flip(relator)
+        palindrome_score = jnp.sum(jnp.where(relator == reversed_relator, 1, 0)) / (length + 1e-8)
         
-        # Immediate cancellation pairs (r[i] = -r[i+1])
-        shifted = jnp.roll(r, -1)
-        pairs = r[:-1] + shifted[:-1]
-        cancel_pairs = jnp.sum(jnp.abs(pairs) < jnp.abs(r[:-1]), where=r[:-1] != 0)  # r[i] == -r[i+1] => r[i] + r[i+1] == 0
-        
-        # Check for palindromic structure: r[i] == -r[-i-1] for inverses or r[i] == r[-i-1] for symmetry
-        reversed_r = jnp.flip(r)
-        inverse_reversed = -reversed_r
-        palindromic_invs = jnp.sum((r == inverse_reversed) & (r != 0))
-        palindromic_same = jnp.sum((r == reversed_r) & (r != 0))
-        symmetry_score = jnp.maximum(palindromic_invs, palindromic_same) / jnp.maximum(length, 1.0)
-        
-        # Penalty for long runs of same generator (reducible via Tietze moves)
-        # Count transitions where generator stays same
-        same_gen = jnp.sum((r[:-1] != 0) & (r[:-1] == r[1:]))
-        run_penalty = same_gen / jnp.maximum(length - 1.0, 1.0)
-        
-        return length, cancel_pairs, symmetry_score, run_penalty
+        return length, exp_sum_1, exp_sum_2, inv_pairs, palindrome_score
     
-    len1, cp1, sym1, rp1 = relator_features(relator1)
-    len2, cp2, sym2, rp2 = relator_features(relator2)
+    # Process both relators
+    r1_len, r1_s1, r1_s2, r1_inv, r1_pal = get_relator_info(r1)
+    r2_len, r2_s1, r2_s2, r2_inv, r2_pal = get_relator_info(r2)
     
-    total_length = len1 + len2
-    total_cancel_pairs = cp1 + cp2
-    avg_symmetry = (sym1 + sym2) / 2.0
-    avg_run_penalty = (rp1 + rp2) / 2.0
+    # Total length and average length
+    total_len = r1_len + r2_len
+    avg_len = total_len / 2.0
     
-    # Length normalization (prefer shorter presentations but with diminishing returns)
-    # Scale so that length=2 (trivial case) gets 1.0, length=72 gets near 0
-    length_score = jnp.clip(1.0 - (total_length - 2) / 70.0, 0.0, 1.0)
+    # Triviality indicators: exponent sums should be zero for trivial relators
+    r1_balance = (jnp.abs(r1_s1) + jnp.abs(r1_s2)) / (r1_len + 1e-8)
+    r2_balance = (jnp.abs(r2_s1) + jnp.abs(r2_s2)) / (r2_len + 1e-8)
+    avg_balance = (r1_balance + r2_balance) / 2.0
     
-    # Cancellation potential: more immediate pairs => easier to reduce
-    max_possible_pairs = jnp.maximum(total_length - 2.0, 1.0)
-    cancel_score = jnp.clip(total_cancel_pairs / max_possible_pairs, 0.0, 1.0)
+    # Cancellation potential: more adjacent inverse pairs = easier to reduce via conjugation
+    total_inv = r1_inv + r2_inv
     
-    # Symmetry score (palindromic structure often indicates simpler group)
-    # Already normalized to [0,1]
+    # Palindrome scores: symmetric structures often easier to handle via AC moves
+    avg_palindrome = (r1_pal + r2_pal) / 2.0
     
-    # Combined score: prefer short length, high cancellation, high symmetry, low run penalty
-    # Normalize each component to [0,1] and combine with weights
-    w_len = 0.3
-    w_cancel = 0.25
-    w_sym = 0.3
-    w_run = 0.15
+    # Normalised components
+    len_score = 1.0 - total_len / MAX_PRESENTATION_LENGTH
+    inv_score = jnp.clip(total_inv / (MAX_RELATOR_LENGTH - 1), 0.0, 1.0)
+    pal_score = avg_palindrome
+    balance_score = 1.0 - avg_balance
     
-    combined_score = (
-        w_len * length_score +
-        w_cancel * cancel_score +
-        w_sym * avg_symmetry +
-        w_run * (1.0 - avg_run_penalty)
-    )
+    # Weighted combination with emphasis on cancellation potential (key for AC moves)
+    # Higher weight on cancellation potential and balance as these directly relate to trivialisation potential
+    weight_inv = 0.35
+    weight_pal = 0.15
+    weight_balance = 0.30
+    weight_len = 0.20
     
-    return combined_score
+    score = (weight_len * len_score + 
+             weight_inv * inv_score + 
+             weight_pal * pal_score + 
+             weight_balance * balance_score)
+    
+    # Ensure output is in [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -2842,126 +2831,109 @@ def heuristic_fn_v24(presentation: jnp.ndarray) -> float:
 ## Request 26
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v25`.
 
-**Latency:** 20.508 s
+**Latency:** 23.176 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v25(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic that estimates trivialisation potential by:
+    1. Normalising presentation length (penalising long presentations)
+    2. Counting potential cancellation pairs (adjacent inverse pairs within relators)
+    3. Detecting palindromic structure (indicative of conjugates or relations that simplify)
+    4. Checking for repeated substrings (suggesting simplification via AC1)
+    
+    The key improvement is capturing structural features that predict future cancellation
+    even when the presentation is currently large (which may be necessary for AC moves).
     """
-    Heuristic that captures potential for cancellation by measuring:
-    1. Current presentation length (prefer shorter)
-    2. Number of cancellation pairs (adjacent generator-inverse pairs)
-    3. Structural patterns like palindromic substrings indicating symmetry
-    4. Relator balance (count of generator vs inverse occurrences)
-    
-    This heuristic is designed to guide search toward presentations that have
-    high cancellation potential even when temporarily long, which is crucial
-    for AC move-based trivialization where intermediate steps often grow.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
+
     # Split into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
-    
-    # Helper to compute length (non-zero elements)
-    def get_length(relator):
-        return jnp.sum(jnp.abs(relator) > 0)
-    
-    # Helper to count cancellation pairs
-    def count_cancellation_pairs(relator):
-        # Shift by one to compare adjacent elements
-        shifted = jnp.roll(relator, 1)
-        # Count pairs where current is negative of previous non-zero
-        pairs = relator * shifted
-        # Cancel if a * (-a) = -a^2, but we check for negative product and non-zero
-        return jnp.sum((pairs < 0) & (jnp.abs(relator) > 0) & (jnp.abs(shifted) > 0))
-    
-    # Helper for palindrome-like symmetry (count matching ends)
-    def count_symmetry(relator):
-        length = jnp.sum(jnp.abs(relator) > 0)
-        # Create masked positions (ignore padding)
-        mask = jnp.abs(relator) > 0
-        # Create reversed version (ignoring padding)
-        rev_idx = jnp.where(mask, jnp.arange(36), -1)
-        # For each position, find the symmetric position from the end
-        rev_relator = jnp.zeros_like(relator)
-        # Fill from the end: positions with non-zero in original go to reversed positions
-        non_zero_indices = jnp.where(mask)[0]
-        if len(non_zero_indices) > 0:
-            rev_indices = non_zero_indices[::-1]
-            rev_relator = rev_relator.at[rev_indices].set(relator[non_zero_indices])
-            # Now compare original masked to reversed masked positions
-            # For each non-zero position i, compare with position (len-1-i)
-            counts = jnp.zeros(1, dtype=jnp.int32)
-            for i in range(len(non_zero_indices)):
-                j = len(non_zero_indices) - 1 - i
-                if i < j:
-                    if relator[non_zero_indices[i]] == relator[non_zero_indices[j]]:
-                        counts = counts + 1
-        else:
-            counts = jnp.zeros(1, dtype=jnp.int32)
-        return counts[0]
-    
-    # Calculate basic metrics
-    len1 = get_length(r1)
-    len2 = get_length(r2)
+    relator1 = presentation[:MAX_RELATOR_LENGTH]
+    relator2 = presentation[MAX_RELATOR_LENGTH:]
+
+    # Normalize lengths
+    len1 = jnp.sum(jnp.abs(relator1) > 0)
+    len2 = jnp.sum(jnp.abs(relator2) > 0)
     total_length = len1 + len2
-    
-    # Normalize total length to [0,1] (prefer shorter: inverse mapping)
-    # Max possible length is 72, min is 2 (trivial case)
-    norm_length = 1.0 - jnp.clip(total_length / 72.0, 0.0, 1.0)
-    
-    # Count cancellation pairs in both relators
-    pairs1 = count_cancellation_pairs(r1)
-    pairs2 = count_cancellation_pairs(r2)
-    total_pairs = pairs1 + pairs2
-    
-    # Normalize pairs (max possible is length/2 per relator)
-    max_pairs = (36 + 36) // 2  # 36 pairs max
-    norm_pairs = jnp.clip(total_pairs / max_pairs, 0.0, 1.0)
-    
-    # Count symmetry
-    sym1 = count_symmetry(r1)
-    sym2 = count_symmetry(r2)
-    total_symmetry = sym1 + sym2
-    
-    # Normalize symmetry (max possible is ~length/2 per relator)
-    max_symmetry = 36  # reasonable upper bound
-    norm_symmetry = jnp.clip(total_symmetry / max_symmetry, 0.0, 1.0)
-    
-    # Calculate balance (difference between generators and inverses per relator)
-    def balance(relator):
-        non_zero = jnp.abs(relator) > 0
-        # Count 1 and 2 (positive) vs -1 and -2 (negative)
-        pos = jnp.sum((relator > 0) & non_zero)
-        neg = jnp.sum((relator < 0) & non_zero)
-        return jnp.abs(pos - neg)
-    
-    bal1 = balance(r1)
-    bal2 = balance(r2)
-    total_balance = bal1 + bal2
-    # Normalize balance (max is total_length)
-    max_balance = total_length if total_length > 0 else 1.0
-    norm_balance = jnp.clip(1.0 - (total_balance / max_balance), 0.0, 1.0)
-    
-    # Combine metrics with weights tuned for AC move search
-    # Prioritize cancellation pairs (directly reducible via Tietze transformations)
-    # and length (core metric), with symmetry and balance as structural cues
-    score = 0.4 * norm_length + 0.35 * norm_pairs + 0.15 * norm_symmetry + 0.1 * norm_balance
-    
+    norm_length = total_length / MAX_PRESENTATION_LENGTH
+
+    # Cancellation pair score: count adjacent inverse pairs in each relator
+    def count_cancellation_pairs(relator):
+        # Pad with zeros to avoid out-of-bounds
+        padded = jnp.concatenate([jnp.array([0]), relator, jnp.array([0])])
+        # Check for adjacent inverse pairs: x and -x
+        pairs = padded[:-1] + padded[1:]
+        return jnp.sum(jnp.abs(pairs[:-1]) == 0)  # pairs where consecutive elements sum to zero
+
+    cancel1 = count_cancellation_pairs(relator1)
+    cancel2 = count_cancellation_pairs(relator2)
+    total_cancellations = cancel1 + cancel2
+
+    # Palindrome score: count matching pairs from ends toward center
+    def palindrome_score(relator):
+        # Get non-zero elements
+        mask = jnp.abs(relator) > 0
+        valid_len = jnp.sum(mask)
+        if valid_len == 0:
+            return 0.0
+        # Truncate to actual length
+        rel_valid = relator[:valid_len]
+        # Compare mirrored positions
+        half_len = valid_len // 2
+        if half_len == 0:
+            return 0.1  # minimal credit for single element
+        rev_rel = rel_valid[::-1]
+        matches = jnp.sum(rel_valid[:half_len] == rev_rel[:half_len])
+        return matches / half_len
+
+    pal1 = palindrome_score(relator1)
+    pal2 = palindrome_score(relator2)
+    avg_pal = (pal1 + pal2) / 2.0
+
+    # Repeated substring heuristic: look for duplicated patterns in relators
+    # Simplified: check if relators share common subwords (nontrivial overlap)
+    def overlap_score(rel1, rel2):
+        # Only check up to length 4 substrings for efficiency
+        max_sub_len = 4
+        subs1 = set()
+        subs2 = set()
+        # Extract non-zero segments
+        mask1 = jnp.abs(rel1) > 0
+        mask2 = jnp.abs(rel2) > 0
+        len1 = jnp.sum(mask1)
+        len2 = jnp.sum(mask2)
+        r1 = rel1[:len1]
+        r2 = rel2[:len2]
+
+        if len1 == 0 or len2 == 0:
+            return 0.0
+        
+        # Build substrings
+        for l in range(2, max_sub_len + 1):
+            for i in range(len(r1) - l + 1):
+                subs1.add(tuple(r1[i:i+l]))
+            for j in range(len(r2) - l + 1):
+                subs2.add(tuple(r2[j:j+l]))
+        
+        overlap = len(subs1 & subs2)
+        return min(overlap / max(1, len(subs1) + len(subs2)), 1.0)
+
+    rel_overlap = overlap_score(relator1, relator2)
+
+    # Combine into a bounded [0,1] score
+    # Emphasise cancellation potential and structure over raw length
+    length_bonus = 1.0 - norm_length
+    cancellation_bonus = jnp.clip(total_cancellations / (MAX_RELATOR_LENGTH * 0.5), 0.0, 1.0)
+    structure_bonus = (avg_pal + rel_overlap) / 2.0
+
+    # Weighting: prioritize structure and cancellations over raw length
+    score = 0.3 * length_bonus + 0.35 * cancellation_bonus + 0.35 * structure_bonus
     return jnp.clip(score, 0.0, 1.0)
-```
+[EVOLVE-BLOCK-END]
 
 
 ---
@@ -2969,31 +2941,20 @@ def heuristic_fn_v25(presentation: jnp.ndarray) -> float:
 ## Request 27
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v26`.
 
-**Latency:** 18.529 s
+**Latency:** 24.495 s
 
 **Output:**
 
-Looking at this problem, I need to design a heuristic that better captures the "structure" or "potential for cancellation" in group presentations, even when intermediate steps grow large. The key insight from combinatorial group theory is that we want to detect:
-
-1. Existing cancellations within relators (like `x x^{-1}` pairs)
-2. Palindromic structure (which often indicates potential for simplification via Tietze transformations)
-3. Subword repetitions that could be reduced
-4. Balance between positive and negative occurrences of generators
-
-Here's my approach for `heuristic_fn_v26`:
-
+[EVOLVE-BLOCK-START]
 ```python
-import jax
-import jax.numpy as jnp
-
 def heuristic_fn_v26(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures cancellation potential and structural patterns.
-    Combines:
-    1. Local cancellation pairs (x x^-1) within relators
-    2. Palindromic structure detection (indicates symmetry for simplification)
-    3. Generator balance (equal positive/negative occurrences)
-    4. Subword repetition patterns
+    r"""
+    Modified heuristic that combines:
+    1. Normalized presentation length (shorter is better)
+    2. Count of reducible pairs (adjacent generator-inverse pairs)
+    3. Detection of palindromic substructures (potential for conjugation-based simplification)
+    4. Symmetry measure between the two relators
+    These features together better capture potential for future cancellation during AC moves.
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -3003,74 +2964,75 @@ def heuristic_fn_v26(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # Split into two relators (max length 36 each)
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Helper to compute properties for a single relator
-    def relator_score(r):
-        # Remove padding
-        mask = r != 0
-        r_valid = r[mask]
-        
-        if r_valid.size == 0:
-            return jnp.array(1.0)
-        
-        length = r_valid.shape[0]
-        
-        # 1. Count cancellation pairs (adjacent x and x^-1)
-        cancellation_pairs = jnp.sum(r_valid[:-1] * r_valid[1:] < 0, dtype=jnp.float32)
-        
-        # 2. Palindrome check (normalized)
-        reversed_r = r_valid[::-1]
-        palindrome_match = jnp.sum(r_valid == reversed_r, dtype=jnp.float32)
-        palindrome_score = palindrome_match / length
-        
-        # 3. Generator balance (count of x1 vs x1^-1, x2 vs x2^-1)
-        x1_count = jnp.sum(r_valid == 1, dtype=jnp.float32)
-        x1_inv_count = jnp.sum(r_valid == -1, dtype=jnp.float32)
-        x2_count = jnp.sum(r_valid == 2, dtype=jnp.float32)
-        x2_inv_count = jnp.sum(r_valid == -2, dtype=jnp.float32)
-        
-        # Balance terms (closer to 0 is more balanced)
-        x1_balance = 1.0 / (1.0 + jnp.abs(x1_count - x1_inv_count))
-        x2_balance = 1.0 / (1.0 + jnp.abs(x2_count - x2_inv_count))
-        balance_score = (x1_balance + x2_balance) / 2.0
-        
-        # 4. Subword repetition - check for repeated patterns of length 2
-        if length >= 4:
-            subwords = r_valid[:-1] * 10 + r_valid[1:]  # encode adjacent pairs
-            unique_subwords = jnp.unique(subwords, size=36, fill_value=0)
-            repetition_score = 1.0 - (unique_subwords.shape[0] / 36.0) * 0.5
-            repetition_score = jnp.clip(repetition_score, 0.0, 1.0)
-        else:
-            repetition_score = 0.5
-        
-        # Combine scores with weights
-        base_score = (cancellation_pairs * 0.3 + 
-                     palindrome_score * 0.2 + 
-                     balance_score * 0.3 +
-                     repetition_score * 0.2)
-        
-        # Normalize by length penalty (shorter is better)
-        length_factor = jnp.exp(-length / 20.0)
-        
-        return base_score * 0.7 + length_factor * 0.3
+    # Extract the two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Compute score for each relator and combine
-    score1 = relator_score(relator1)
-    score2 = relator_score(relator2)
+    # 1. Length score: normalized inverse length (penalize long presentations)
+    is_nonzero = jnp.abs(presentation) > 0
+    total_length = jnp.sum(is_nonzero)
+    length_score = 1.0 - (total_length / MAX_PRESENTATION_LENGTH)
     
-    # Combined score (geometric mean to penalize imbalances)
-    combined_score = jnp.sqrt(score1 * score2)
+    # 2. Reducible pair count: adjacent generator-inverse pairs within each relator
+    # For r1: count positions i where presentation[i] == -presentation[i+1] and both non-zero
+    def count_reducible_pairs(relator):
+        # Pad to enable cyclic check for the last and first elements
+        padded = jnp.concatenate([relator, relator[:1]])
+        # Check adjacent pairs
+        reducible = (padded[:-1] != 0) & (padded[1:] != 0) & (padded[:-1] == -padded[1:])
+        return jnp.sum(reducible)
     
-    # Additional bonus for total length being small (target is 2)
-    total_length = jnp.sum(presentation != 0)
-    length_bonus = jnp.exp(-total_length / 10.0)
+    reducible_r1 = count_reducible_pairs(r1)
+    reducible_r2 = count_reducible_pairs(r2)
+    reducible_score = (reducible_r1 + reducible_r2) / (2 * MAX_RELATOR_LENGTH)
     
-    final_score = combined_score * 0.8 + length_bonus * 0.2
+    # 3. Palindromic symmetry within each relator (indicates potential for conjugation)
+    def palindrome_score(relator):
+        # Only consider non-zero prefix
+        mask = jnp.cumsum(jnp.where(relator != 0, 1, 0)) <= MAX_RELATOR_LENGTH
+        actual_len = jnp.sum(mask)
+        actual_len = jnp.maximum(actual_len, 1)  # Avoid division by zero
+        relator_trunc = relator[:actual_len]
+        # Compare with reverse
+        reversed_relator = relator_trunc[::-1]
+        matches = (relator_trunc == reversed_relator).astype(jnp.float32)
+        return jnp.mean(matches)
     
-    return jnp.clip(final_score, 0.0, 1.0)
+    pal_score_r1 = palindrome_score(r1)
+    pal_score_r2 = palindrome_score(r2)
+    palindrome_score_val = (pal_score_r1 + pal_score_r2) / 2.0
+    
+    # 4. Symmetry between r1 and r2: measure how similar they are (potential for cancellation via AC1)
+    # Normalize both relators to same length
+    len_r1 = jnp.sum((r1 != 0).astype(jnp.int32))
+    len_r2 = jnp.sum((r2 != 0).astype(jnp.int32))
+    common_len = jnp.minimum(len_r1, len_r2)
+    
+    # Compute similarity between first common_len elements (as strings)
+    sim_r1_r2 = jnp.mean(jnp.where(
+        (jnp.arange(MAX_RELATOR_LENGTH) < common_len) & 
+        (r1 != 0) & (r2 != 0),
+        jnp.where(r1 == r2, 1.0, 0.0),
+        0.0
+    ))
+    
+    # Combine scores with weights
+    # Emphasize reducible pairs and palindromes as they indicate internal structure
+    # for AC2 (conjugation) and AC1 moves to reduce presentation
+    total_score = (
+        0.3 * length_score +
+        0.3 * reducible_score +
+        0.25 * palindrome_score_val +
+        0.15 * sim_r1_r2
+    )
+    
+    # Ensure output is in [0, 1]
+    return jnp.clip(total_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -3079,107 +3041,142 @@ def heuristic_fn_v26(presentation: jnp.ndarray) -> float:
 ## Request 28
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v27`.
 
-**Latency:** 19.220 s
+**Latency:** 28.232 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic that detects structural properties useful for trivialisation, rather than just the baseline length metric.
 
+The key insight is that we need to detect:
+1. **Cancellation potential** - how many inverse pairs can be cancelled in each relator
+2. **Structural patterns** like palindromes or repeated substrings that suggest simplification potential
+3. **Balance** - relators with similar structures may be easier to trivialise
+4. **Local complexity** - avoiding too many consecutive same generators (repetitions)
+
+Here's my approach:
+- Compute the number of possible cancellations by checking adjacent inverse pairs
+- Check for palindromic structure (which often indicates reducibility)
+- Measure relator complexity (simpler relators are better)
+- Penalize very long presentations but with diminishing returns (log scale)
+
+```python
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v27(presentation: jnp.ndarray) -> float:
-    """
-    Enhanced heuristic that captures structural properties conducive to trivialisation.
-    Combines:
-    1. Normalized presentation length (lower is better, but avoids overly harsh penalties for growth)
-    2. Count of immediate cancellation pairs (adjacent inverse pairs like [1, -1])
-    3. Palindromic structure in relators (suggests symmetry useful for cancellation)
-    4. Repeated subword patterns (suggests potential for simplification via Tietze transformations)
-    
-    The heuristic is designed to be resilient to intermediate growth while detecting hidden structure.
+    r"""
+    Enhanced heuristic focusing on cancellation potential and structural simplicity.
+    Key improvements over v0:
+    1. Counts maximal cancellation pairs within each relator
+    2. Measures palindromic symmetry which often indicates reducibility
+    3. Penalizes extreme length with logarithmic scaling to avoid local maxima
+    4. Considers balance between relator complexities
     
     Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+        presentation: Array representing current group presentation [r_1; r_2]. Shape (72,) int32.
     
     Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
+        Scalar heuristic in [0,1] (higher = better trivialisation potential).
     """
-    # Split into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = 72
     
-    # Compute actual lengths (non-zero elements)
-    len1 = jnp.sum(r1 != 0)
-    len2 = jnp.sum(r2 != 0)
+    # Split into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
+    
+    # Get non-padding masks
+    r1_mask = r1 != 0
+    r2_mask = r2 != 0
+    
+    # Effective lengths
+    len1 = jnp.sum(r1_mask)
+    len2 = jnp.sum(r2_mask)
     total_len = len1 + len2
     
-    # Compute normalized length score: 1.0 for total_len=2 (optimal), decays to ~0.1 for very long presentations
-    # Use exponential decay for smoother gradients
-    length_score = jnp.exp(-0.08 * (total_len - 2))
+    # Compute cancellation potential for each relator
+    def compute_cancellation(relator, mask):
+        # Find inverse pairs by checking adjacent positions
+        # For each position i, check if relator[i] + relator[i+1] == 0
+        shifted = jnp.roll(relator, -1)
+        inverse_pairs = jnp.logical_and(
+            mask[:-1], 
+            jnp.roll(mask, -1)[:-1],
+            (relator[:-1] + shifted[:-1] == 0)
+        )
+        # Count non-overlapping inverse pairs greedily
+        cancellable = jnp.zeros_like(inverse_pairs, dtype=jnp.bool_)
+        i = 0
+        while i < len(inverse_pairs):
+            if inverse_pairs[i]:
+                cancellable = cancellable.at[i].set(True)
+                i += 2  # Skip next position (overlapping not allowed)
+            else:
+                i += 1
+        return jnp.sum(cancellable)
     
-    # Count immediate cancellation pairs within each relator (adjacent inverse pairs)
-    def count_cancellations(relator):
-        # Create shifted versions: [x0, x1, ...] and [x1, x2, ...]
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Count positions where current element is inverse of next
-        # (a and b are inverses iff a + b == 0)
-        is_inverse = (relator[:-1] + shifted[:-1]) == 0
-        return jnp.sum(is_inverse.astype(jnp.int32))
+    # Use lax.scan for efficient computation (vectorization)
+    def cancellation_count(arr):
+        # Create pairs array and compute inverses
+        padded_arr = jnp.concatenate([arr, jnp.array([0])])
+        inv_pairs = (arr[:-1] + arr[1:] == 0) & (arr[:-1] != 0) & (arr[1:] != 0)
+        
+        # Count non-overlapping pairs using scan
+        def scan_fn(state, x):
+            i, count, last_cancelled = state
+            should_cancel = jnp.logical_and(x, jnp.logical_not(last_cancelled))
+            new_state = (
+                i + 1,
+                count + jnp.where(should_cancel, 1, 0),
+                jnp.where(should_cancel, True, False)
+            )
+            return new_state, None
+        
+        init = (0, 0, False)
+        (final_i, final_count, _), _ = jax.lax.scan(
+            scan_fn, init, inv_pairs, unroll=2
+        )
+        return final_count
     
-    cancel1 = count_cancellations(r1)
-    cancel2 = count_cancellations(r2)
-    total_cancellations = cancel1 + cancel2
+    # Compute cancellations for each relator
+    canc1 = cancellation_count(r1)
+    canc2 = cancellation_count(r2)
+    total_cancellations = canc1 + canc2
     
-    # Normalize cancellation count: expect up to 3-4 cancellations in good presentations
-    # Cap at 4 for normalization
-    cancel_score = jnp.minimum(total_cancellations.astype(jnp.float32), 4.0) / 4.0
+    # Compute palindromic symmetry score
+    def palindrome_score(relator, mask):
+        # For each position, check if it matches its mirror position
+        rev_rel = jnp.flip(relator * mask)
+        rev_mask = jnp.flip(mask)
+        matching = (relator == rev_rel) & mask
+        return jnp.sum(matching) / jnp.maximum(jnp.sum(mask), 1.0)
     
-    # Detect palindromic structure (reversed relator is close to original)
-    def pal_score(relator):
-        # Remove padding for fair comparison
-        mask = relator != 0
-        non_zero = relator * mask
-        # Get non-zero elements only for palindrome check
-        rev = jnp.flip(non_zero * mask)
-        # Compare element-wise
-        matches = (non_zero * mask == rev * mask)
-        # Normalize by number of non-zero elements
-        n = jnp.sum(mask)
-        return jnp.where(n > 0, jnp.sum(matches.astype(jnp.float32)) / n, 0.0)
-    
-    pal1 = pal_score(r1)
-    pal2 = pal_score(r2)
+    pal1 = palindrome_score(r1, r1_mask)
+    pal2 = palindrome_score(r2, r2_mask)
     avg_pal = (pal1 + pal2) / 2.0
     
-    # Detect repeated subwords (look for matching substrings of length 2)
-    def repeated_subword_score(relator):
-        # Get all length-2 substrings (excluding padding)
-        substrs = jnp.stack([relator[:-1], relator[1:]], axis=1)  # shape: (35, 2)
-        # For each position, check if same pair appears elsewhere
-        # Vectorized comparison for efficiency
-        flat = substrs.reshape(-1)
-        counts = jnp.bincount(flat, minlength=37)  # count generator occurrences
-        # Use count variance as proxy for repetition
-        mean_count = jnp.mean(counts[1:3])  # ignore 0 and consider generators 1,2
-        return jnp.minimum(mean_count, 3.0) / 3.0
+    # Compute normalized presentation length (lower is better)
+    # Use log scaling to avoid extreme penalties for moderate growth
+    log_len = jnp.log1p(total_len)
+    log_max = jnp.log1p(MAX_PRESENTATION_LENGTH)
+    norm_len = 1.0 - (log_len / log_max)
     
-    rep1 = repeated_subword_score(r1)
-    rep2 = repeated_subword_score(r2)
-    avg_rep = (rep1 + rep2) / 2.0
-    
-    # Combine scores with weights
-    # Give highest weight to cancellations (most direct evidence of simplifiability)
-    # Then length, then repetition/palindrome as structural indicators
+    # Combine components with weights
+    # Emphasize cancellations as primary indicator
     score = (
-        0.45 * length_score +
-        0.35 * cancel_score +
-        0.10 * avg_pal +
-        0.10 * avg_rep
+        0.5 * (total_cancellations / jnp.maximum(total_len, 1.0)) +
+        0.3 * avg_pal +
+        0.2 * norm_len
     )
     
+    # Ensure bounded [0,1]
+    score = jnp.clip(score, 0.0, 1.0)
+    
+    # Bonus for very short presentations (already near trivial)
+    bonus = jnp.where(total_len <= 2, 0.2 * (2.0 - total_len), 0.0)
+    score = jnp.clip(score + bonus, 0.0, 1.0)
+    
     return score
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -3188,120 +3185,99 @@ def heuristic_fn_v27(presentation: jnp.ndarray) -> float:
 ## Request 29
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v28`.
 
-**Latency:** 20.601 s
+**Latency:** 24.550 s
 
 **Output:**
 
 ```python
-import jax
-import jax.numpy as jnp
-
+# [EVOLVE-BLOCK-START]
 def heuristic_fn_v28(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic that captures structural properties conducive to trivialisation:
+    - Penalises presentation length (to encourage shortening paths)
+    - Rewards cancellation potential: counts matching generator-inverse pairs in the same relator
+    - Rewards symmetry: counts reversed relator structure (potential palindrome-like patterns)
+    - Rewards balance: penalises extreme imbalance between relator lengths
+    
+    These features help identify presentations that are "structured" and likely to be 
+    reducible via AC moves, even when temporarily long.
     """
-    Enhanced heuristic for group presentation trivialisation that combines:
-    1. Normalized presentation length (shorter is better)
-    2. Cancellation potential: counts matching generator/inverse pairs in adjacent positions
-    3. Palindromic symmetry: measures self-similarity which often indicates reducibility
-    4. Generator frequency balance: penalizes extreme imbalances in generator usage
-    
-    These features are combined in a way that prioritizes short presentations with high
-    cancellation potential and symmetry, which are strong indicators of "near-trivial" structure.
-    
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
-    
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # [EVOLVE-BLOCK-START]
-    # Constants
+    N_GENERATORS = 2
     MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Split presentation into two relators
+    # Split into two relators
     r1 = presentation[:MAX_RELATOR_LENGTH]
     r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Create masks for non-padding elements
-    mask_r1 = r1 != 0
-    mask_r2 = r2 != 0
+    # Calculate actual lengths (non-zero entries)
+    len_r1 = jnp.sum(r1 != 0)
+    len_r2 = jnp.sum(r2 != 0)
     
-    # Compute lengths (number of non-zero elements)
-    len_r1 = jnp.sum(mask_r1)
-    len_r2 = jnp.sum(mask_r2)
-    total_length = len_r1 + len_r2
+    # Normalize lengths (closer to 0 is better)
+    norm_len = (len_r1 + len_r2) / MAX_PRESENTATION_LENGTH
     
-    # Normalized length score (higher for shorter presentations)
-    # Max possible length is 72, so normalize by 72
-    length_score = 1.0 - (total_length / 72.0)
-    
-    # Cancellation potential: count positions where adjacent elements could cancel
-    # For each relator, count pairs (i, i+1) where r[i] == -r[i+1]
-    def count_cancellations(relator, mask):
-        # Create shifted versions to compare adjacent elements
+    # Cancellation potential: count adjacent generator-inverse pairs within each relator
+    # For r1: check pairs (i, i+1) where r1[i] = -r1[i+1]
+    def count_cancellations(relator):
+        # Shift by one and compare
         shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check for cancellation pairs (non-zero and opposite signs)
-        cancel_mask = (relator != 0) & (shifted != 0) & (relator == -shifted)
-        # Only count pairs where both elements are part of the relator (not padding)
-        valid_mask = mask & jnp.concatenate([mask[1:], jnp.array([False])])
-        return jnp.sum(cancel_mask & valid_mask)
+        # Count where current element is negative of next
+        return jnp.sum(relator[:-1] * shifted[:-1] < 0) - jnp.sum(relator[:-1] == 0) + jnp.sum(relator == 0)
     
-    cancel_r1 = count_cancellations(r1, mask_r1)
-    cancel_r2 = count_cancellations(r2, mask_r2)
-    total_cancellations = cancel_r1 + cancel_r2
+    # More robust cancellation counting (avoiding padding issues)
+    r1_nonzero = (r1 != 0).astype(jnp.float32)
+    r2_nonzero = (r2 != 0).astype(jnp.float32)
     
-    # Normalize cancellation score (max possible is (35+35) = 70 pairs)
-    cancellation_score = total_cancellations / 70.0
+    # Create padded versions for safe adjacency checking
+    r1_padded = jnp.concatenate([r1, jnp.array([0])])
+    r2_padded = jnp.concatenate([r2, jnp.array([0])])
     
-    # Palindromic symmetry score: measure how close each relator is to being a palindrome
-    def palindromic_score(relator, mask):
-        # Reverse the relator, but keep padding at the end
-        reversed_rel = jnp.flip(relator * mask) * mask
-        
-        # Count matching positions (excluding padding)
-        non_pad = mask > 0
-        matches = (relator == reversed_rel) & non_pad
-        max_matches = jnp.sum(non_pad)
-        return jnp.where(max_matches > 0, jnp.sum(matches) / max_matches, 0.0)
+    # Adjacent cancellation count for r1
+    r1_cancellation = jnp.sum(
+        (r1[:-1] != 0) * (r1[1:] != 0) * (r1[:-1] == -r1[1:])
+    )
+    r2_cancellation = jnp.sum(
+        (r2[:-1] != 0) * (r2[1:] != 0) * (r2[:-1] == -r2[1:])
+    )
     
-    pal_r1 = palindromic_score(r1, mask_r1)
-    pal_r2 = palindromic_score(r2, mask_r2)
-    symmetry_score = (pal_r1 + pal_r2) / 2.0
+    # Total cancellation potential
+    total_cancellation = r1_cancellation + r2_cancellation
     
-    # Generator balance: penalize if one generator dominates heavily
-    def generator_balance(relator):
-        # Count occurrences of each generator type (ignoring padding)
-        abs_r = jnp.abs(relator)
-        nonzero = abs_r > 0
-        
-        # Count generators 1 and 2 (ignoring sign)
-        g1_count = jnp.sum((abs_r == 1) & nonzero)
-        g2_count = jnp.sum((abs_r == 2) & nonzero)
-        
-        # Use entropy-like measure: higher when balanced
-        total_nonzero = jnp.sum(nonzero)
-        # Avoid division by zero
-        ratio = jnp.where(total_nonzero > 0, g1_count / total_nonzero, 0.5)
-        # Balanced score: 1 when ratio=0.5, decreasing as ratio moves away from 0.5
-        balance = 1.0 - 2.0 * jnp.abs(ratio - 0.5)
-        return balance
+    # Symmetry score: reverse one relator and compare to the other
+    # Reverse r1 (ignoring padding at the end)
+    r1_reversed = jnp.flip(r1 * r1_nonzero)
+    # Count common elements (ignoring padding)
+    r1r_r2_match = jnp.sum(
+        (r1_reversed != 0) * (r2 != 0) * (r1_reversed == r2)
+    )
     
-    balance_r1 = generator_balance(r1)
-    balance_r2 = generator_balance(r2)
-    balance_score = (balance_r1 + balance_r2) / 2.0
+    # Normalize scores
+    cancellation_score = total_cancellation / MAX_RELATOR_LENGTH
+    symmetry_score = r1r_r2_match / MAX_RELATOR_LENGTH
     
-    # Combine scores with weights
-    # Give highest weight to length (primary goal), then cancellations, then symmetry
-    # and balance as secondary indicators of reducibility structure
-    score = (0.5 * length_score + 
-             0.3 * cancellation_score + 
-             0.15 * symmetry_score + 
-             0.05 * balance_score)
+    # Length penalty: prefer shorter presentations
+    length_score = 1.0 - norm_len
     
-    # Ensure score is in [0,1] range
+    # Balance score: penalty for extreme length imbalance
+    length_diff = jnp.abs(len_r1 - len_r2)
+    max_diff = MAX_RELATOR_LENGTH
+    balance_score = 1.0 - length_diff / max_diff
+    
+    # Combine scores with weights reflecting importance for trivialisation
+    # Cancellation is most important (direct path to simplification)
+    # Balance helps avoid degenerate states
+    # Symmetry may indicate hidden structure exploitable by conjugation
+    score = (
+        0.5 * cancellation_score +
+        0.25 * balance_score +
+        0.15 * symmetry_score +
+        0.10 * length_score
+    )
+    
+    # Ensure bounded in [0,1]
     return jnp.clip(score, 0.0, 1.0)
-    # [EVOLVE-BLOCK-END]
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -3310,25 +3286,39 @@ def heuristic_fn_v28(presentation: jnp.ndarray) -> float:
 ## Request 30
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v29`.
 
-**Latency:** 27.802 s
+**Latency:** 36.720 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic that can detect "structure" or "potential for cancellation" in group presentations, especially for cases where intermediate states may grow larger before shrinking.
 
-def heuristic_fn_v29(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic for group presentation trivialization that combines:
-    1. Current presentation length (shorter is better)
-    2. Count of immediate cancellation pairs within each relator (potential for simplification)
-    3. Palindromic structure detection (symmetric relators may indicate simplifiability)
-    4. Generator balance (equal count of generators and inverses in each relator)
+The key insight from the problem description is that intermediate presentations may need to grow very large to trivialise a presentation, so naive length-based heuristics are insufficient. I need to detect patterns like:
+- Cancellation potential (adjacent inverse pairs)
+- Palindromic structure (which can be simplified via conjugation)
+- Repeated substrings that indicate redundancy
+- Symmetry between the two relators
+
+Here's my approach for `heuristic_fn_v29`:
+
+1. **Cancellation pairs**: Count adjacent inverse pairs that could be reduced via group operations
+2. **Palindrome detection**: Palindromic relators often have simplification potential
+3. **Relator symmetry**: Measure how "balanced" the two relators are
+4. **Length penalty**: Still consider length but with diminishing returns for very long presentations (to avoid penalizing necessary growth)
+
+The key structural change from a baseline is incorporating multiple cancellation metrics rather than just length.
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Enhanced heuristic that captures cancellation potential, palindrome structure,
+    and relator symmetry to better estimate trivialisation likelihood.
     
-    This heuristic penalizes long presentations but provides escape mechanisms for
-    intermediate states that show structural properties indicating potential for future
-    simplification through AC moves, even if the current length is large.
+    Key improvements over length-only heuristics:
+    - Counts reducible cancellation pairs (adjacent inverses)
+    - Detects palindromic structure in relators (potential for conjugation simplification)
+    - Measures symmetry between relators
+    - Uses sublinear length penalty to avoid penalizing necessary growth
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -3338,81 +3328,91 @@ def heuristic_fn_v29(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # Split into two relators
-    relator1 = presentation[:36]
-    relator2 = presentation[36:]
-    
-    # Helper to compute length (non-zero elements)
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
+
+    # Extract the two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
+
+    # Function to get actual length (non-zero elements)
     def get_length(relator):
         return jnp.sum(jnp.abs(relator) > 0)
-    
-    # Helper to count immediate cancellation pairs (x followed by x^-1)
+
+    # Cancellation pairs: adjacent inverse pairs within each relator
     def count_cancellation_pairs(relator):
-        # Create shifted version (first element is 0)
-        shifted = jnp.concatenate([jnp.array([0]), relator[:-1]])
-        # Check for cancellation pairs: a[i] + a[i-1] == 0 and both non-zero
-        cancellation_mask = (relator != 0) & (shifted != 0) & (relator + shifted == 0)
-        return jnp.sum(cancellation_mask)
-    
-    # Helper to compute generator balance score (1 = perfect balance, 0 = unbalanced)
-    def generator_balance(relator):
-        # Filter out padding
-        non_zero = relator[relator != 0]
-        if non_zero.size == 0:
-            return 1.0
-        # Count occurrences of each generator and its inverse
-        gen_counts = jnp.bincount(jnp.abs(non_zero), minlength=3)[1:3]  # counts for gen 1 and 2
-        inv_counts = jnp.bincount(jnp.abs(-non_zero), minlength=3)[1:3]  # same as gen_counts
-        # Balance = 1 - |#gen - #inv| / total
-        total = jnp.sum(gen_counts)
-        balance = 1.0 - jnp.abs(gen_counts[0] - inv_counts[0] + gen_counts[1] - inv_counts[1]) / (2 * total + 1e-8)
-        return balance
-    
-    # Helper to compute palindrome similarity
+        # Create shifted arrays for adjacent pairs
+        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
+        # Check if adjacent elements are inverses (sum to zero and both non-zero)
+        is_inverse_pair = (relator + shifted == 0) & (jnp.abs(relator) > 0)
+        return jnp.sum(is_inverse_pair)
+
+    # Count palindrome potential: relator equals its reverse (with sign flip for inverses)
     def palindrome_score(relator):
-        # Filter out padding
-        non_zero = relator[relator != 0]
-        if non_zero.size <= 1:
-            return 1.0
+        # Reverse the relator
+        reversed_relator = jnp.flip(relator)
+        # For palindrome, we need r[i] = -r[n-1-i]
+        # But since we're in group theory, the reverse of a relator that's a palindrome 
+        # should be its inverse, meaning r[i] = -r[n-1-i]
+        inverted_reversed = -reversed_relator
+        # Compare only non-padding positions
+        is_padding = (relator == 0) & (inverted_reversed == 0)
+        valid_positions = jnp.abs(relator) > 0
+        matches = (relator == inverted_reversed) | is_padding
+        return jnp.sum(matches & valid_positions) / (jnp.sum(valid_positions) + 1e-6)
+
+    # Symmetry between relators r1 and r2 (including inverse)
+    def symmetry_score(rel1, rel2):
+        # Check if rel1 == rel2 or rel1 == -reverse(rel2)
+        reversed_rel2 = jnp.flip(rel2)
+        inverse_reversed_rel2 = -reversed_rel2
         
-        # Compute reversed version with sign flipped (for group inverse)
-        reversed_relator = jnp.flip(non_zero)
-        flipped_reversed = -reversed_relator
+        valid_mask = (jnp.abs(rel1) > 0) | (jnp.abs(rel2) > 0)
         
-        # Compare original with flipped reversed (element-wise similarity)
-        match = jnp.sum(non_zero == flipped_reversed)
-        return match / non_zero.size
-    
-    # Compute components for both relators
-    len1 = get_length(relator1)
-    len2 = get_length(relator2)
+        match_direct = (rel1 == rel2) | (rel1 == 0) | (rel2 == 0)
+        match_inverse = (rel1 == inverse_reversed_rel2) | (rel1 == 0) | (reversed_rel2 == 0)
+        
+        matches = jnp.maximum(match_direct, match_inverse)
+        return jnp.sum(matches & valid_mask) / (jnp.sum(valid_mask) + 1e-6)
+
+    # Compute metrics
+    len1, len2 = get_length(r1), get_length(r2)
     total_len = len1 + len2
     
-    cancel1 = count_cancellation_pairs(relator1)
-    cancel2 = count_cancellation_pairs(relator2)
-    total_cancel = cancel1 + cancel2
+    # Normalized length score (sublinear to avoid punishing necessary growth)
+    max_expected_len = 10.0
+    length_score = jnp.where(total_len <= max_expected_len, 
+                            1.0 - total_len / MAX_PRESENTATION_LENGTH,
+                            jnp.maximum(0.1, 1.0 - jnp.log(total_len + 1) / jnp.log(MAX_PRESENTATION_LENGTH + 1)))
+
+    # Cancellation potential score
+    cancel1, cancel2 = count_cancellation_pairs(r1), count_cancellation_pairs(r2)
+    cancel_score = jnp.minimum(1.0, (cancel1 + cancel2) / 4.0)
+
+    # Palindrome scores
+    pal1 = palindrome_score(r1)
+    pal2 = palindrome_score(r2)
+    palindrome_score_mean = (pal1 + pal2) / 2.0
+
+    # Symmetry between relators
+    symmetry = symmetry_score(r1, r2)
+
+    # Combine scores with weights tuned for group-theoretic structure
+    # Palindromes and symmetry are strong indicators of simplifiability
+    # Cancellation pairs indicate immediate reduction potential
+    # Length is still important but penalized less severely
     
-    balance1 = generator_balance(relator1)
-    balance2 = generator_balance(relator2)
-    avg_balance = (balance1 + balance2) / 2.0
-    
-    palin1 = palindrome_score(relator1)
-    palin2 = palindrome_score(relator2)
-    avg_palin = (palin1 + palin2) / 2.0
-    
-    # Normalize length component: score=1 when total_len=2 (trivial), score=0 when total_len>=100
-    length_score = jnp.clip(1.0 - total_len / 98.0, 0.0, 1.0)
-    
-    # Weighted combination of components
-    # Higher weight on length since that's the primary measure, but include structural features
-    score = (
-        0.6 * length_score +
-        0.2 * jnp.clip(total_cancel / 10.0, 0.0, 1.0) +  # Normalize cancellation pairs
-        0.1 * avg_balance +
-        0.1 * avg_palin
+    final_score = (
+        0.15 * length_score +
+        0.25 * (cancel_score) +
+        0.30 * (palindrome_score_mean) +
+        0.30 * (symmetry)
     )
     
-    return score
+    # Ensure output in [0,1]
+    return jnp.clip(final_score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```
 
 
@@ -3421,91 +3421,74 @@ def heuristic_fn_v29(presentation: jnp.ndarray) -> float:
 ## Request 31
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v30`.
 
-**Latency:** 26.324 s
+**Latency:** 21.298 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
-
+[EVOLVE-BLOCK-START]
 def heuristic_fn_v30(presentation: jnp.ndarray) -> float:
+    r"""
+    Improved heuristic incorporating three key components:
+    1. Normalized cancellation potential: counts reducible adjacent pairs (generator * inverse)
+    2. Palindrome symmetry score: detects self-similar structures that may simplify via conjugation
+    3. Length reduction penalty for intermediate bloat: rewards presentations where reduction is possible without excessive growth
+    
+    This addresses the problem that intermediate states during trivialization often grow in length, so simple length-based heuristics are misleading.
     """
-    Enhanced heuristic that considers:
-    1. Total cancellation potential (pairs of adjacent inverse elements)
-    2. Palindromic structure (suggested self-inverse relators)
-    3. Length efficiency (shorter presentations preferred)
-    4. Balance between relators (similarity in lengths and content)
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
     
-    This heuristic estimates the "trivializability" of a presentation by capturing
-    structural properties that facilitate AC move simplification.
+    # Reshape to separate the two relators
+    relator1 = presentation[:MAX_RELATOR_LENGTH]
+    relator2 = presentation[MAX_RELATOR_LENGTH:]
     
-    Args:
-        presentation: Array representing current group presentation in terms of relators
-            [r_1; r_2]. Shape (72,) int32 array. 0 is padding.
+    # Helper to compute reducible pair count (adjacent generator * inverse)
+    def reducible_pairs(r):
+        # Remove padding
+        mask = r != 0
+        valid = jnp.where(mask, r, 0)
+        # Create shifted version (next element)
+        shifted = jnp.concatenate([valid[1:], jnp.zeros(1, dtype=jnp.int32)])
+        # Count pairs where r[i] * shifted[i] == -1 (i.e., inverse pair)
+        product = valid * shifted
+        return jnp.sum(product == -1)
     
-    Returns:
-        Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
-        future (higher is better).
-    """
-    # Split presentation into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    # Calculate reducible pairs in each relator
+    pairs1 = reducible_pairs(relator1)
+    pairs2 = reducible_pairs(relator2)
     
-    # Create masks for non-padding elements
-    mask1 = r1 != 0
-    mask2 = r2 != 0
+    # Palindrome symmetry score: count positions where r[i] == -r[-i-1]
+    def palindrome_score(r):
+        mask = r != 0
+        valid_len = jnp.sum(mask.astype(jnp.int32))
+        # Only consider non-zero part
+        truncated = r[:valid_len] if valid_len > 0 else r[:1]
+        rev = truncated[::-1]
+        return jnp.sum(truncated == -rev)
     
-    # Count actual lengths
-    len1 = jnp.sum(mask1)
-    len2 = jnp.sum(mask2)
+    pal1 = palindrome_score(relator1)
+    pal2 = palindrome_score(relator2)
     
-    # Compute cancellation potential: count adjacent inverse pairs
-    def count_cancellations(relator, mask):
-        # Create shifted arrays for checking adjacent pairs
-        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
-        # Check for inverse pairs (x, -x)
-        inverse_pairs = (relator * shifted == -1) | (relator * shifted == -4)
-        # Only count pairs where both elements are non-zero
-        return jnp.sum(inverse_pairs * mask[1:])
+    # Total length (non-zero entries)
+    total_len = jnp.sum(presentation != 0)
     
-    cancel1 = count_cancellations(r1, mask1)
-    cancel2 = count_cancellations(r2, mask2)
-    total_cancel = cancel1 + cancel2
+    # Normalize components
+    max_pairs_per_relator = MAX_RELATOR_LENGTH - 1
+    max_pal_per_relator = MAX_RELATOR_LENGTH
     
-    # Compute palindromic structure: similarity between relator and its reverse
-    def palindromic_score(relator, mask):
-        # Reverse the relator, but only consider non-padding part
-        rev = jnp.flip(relator * mask)
-        rev_mask = jnp.flip(mask)
-        # Compare element-wise with original (only where both are non-zero)
-        matches = (relator == rev) * mask * rev_mask
-        return jnp.sum(matches) / jnp.maximum(jnp.sum(mask), 1.0)
+    pair_score = (pairs1 + pairs2) / (2 * max_pairs_per_relator)
+    pal_score = (pal1 + pal2) / (2 * max_pal_per_relator)
     
-    pal_score1 = palindromic_score(r1, mask1)
-    pal_score2 = palindromic_score(r2, mask2)
-    avg_pal_score = (pal_score1 + pal_score2) / 2.0
+    # Length penalty: avoid overly long presentations unless they show high reduction potential
+    # Use a smoothed penalty: if length is below threshold, reward; above, penalize exponentially
+    length_penalty = jnp.exp(-0.03 * (total_len - 12))  # Optimal around 12 total length
     
-    # Length efficiency: normalized to [0,1] with shorter being better
-    # Max possible length is 72 (36+36), but for trivial group we want 2 (both relators of length 1)
-    total_len = len1 + len2
-    max_len = 72.0
-    min_len = 2.0  # target minimum for trivial presentation
-    # Score: 1.0 when total_len=2, decreasing to 0 as length increases
-    len_score = jnp.clip(1.0 - (total_len - min_len) / (max_len - min_len), 0.0, 1.0)
+    # Combine scores
+    score = 0.4 * pair_score + 0.3 * pal_score + 0.3 * length_penalty
     
-    # Balance score: prefer relators of similar length
-    len_diff = jnp.abs(len1 - len2)
-    max_bal_diff = 34.0  # max possible difference: 36 vs 2
-    bal_score = jnp.clip(1.0 - len_diff / max_bal_diff, 0.0, 1.0)
-    
-    # Combined score: weighted sum
-    # Weight cancellation potential highly as it directly relates to simplification potential
-    score = 0.4 * len_score + 0.2 * total_cancel / jnp.maximum(total_len, 1.0) + \
-            0.2 * avg_pal_score + 0.2 * bal_score
-    
-    return score
-```
+    # Clamp to [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+[EVOLVE-BLOCK-END]
 
 
 ---
@@ -3513,25 +3496,32 @@ def heuristic_fn_v30(presentation: jnp.ndarray) -> float:
 ## Request 32
 **Prompt:** Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v31`.
 
-**Latency:** 33.235 s
+**Latency:** 36.462 s
 
 **Output:**
 
-```python
-import jax
-import jax.numpy as jnp
+Looking at the problem, I need to create a more sophisticated heuristic than the baseline length-based approach. The key insight is that for trivial group presentations, we want to detect cancellation potential, palindrome symmetry, and structural patterns that suggest the presentation can be simplified.
 
-def heuristic_fn_v31(presentation: jnp.ndarray) -> float:
-    """
-    Heuristic that captures structural properties conducive to trivialisation via AC moves.
-    Combines:
-    1. Cancellation potential: counts matched generator-inverse adjacent pairs (reducible via inverse cancellation)
-    2. Palindromic structure: self-similar patterns often indicate symmetry helpful for trivialisation
-    3. Segment repetition: recurring substrings suggest compressibility
-    4. Normalized by presentation length to avoid bias toward long presentations
+Let me design a heuristic that captures:
+1. **Cancellation potential**: Count pairs of adjacent inverse elements that can be reduced
+2. **Symmetry properties**: Palindromic relators or symmetric patterns often indicate simplifiability
+3. **Structure detection**: Repeated substrings or patterns that might be removable via AC moves
+4. **Length normalization**: Still consider length but weight structure more heavily
+
+Here's my improved heuristic function:
+
+```python
+# [EVOLVE-BLOCK-START]
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
+    Heuristic estimating likelihood of trivialisation based on cancellation potential,
+    symmetry, and structural patterns in the relators.
     
-    The score is a weighted combination of normalized features, designed to be robust for MCTS
-    even when intermediate steps temporarily increase presentation length.
+    Improvements over baseline:
+    - Detects cancellation pairs (adjacent inverse elements)
+    - Rewards palindromic structure in relators
+    - Identifies repeated substrings that may be removable via AC moves
+    - Combines multiple structural cues into a bounded [0,1] score
     
     Args:
         presentation: Array representing current group presentation in terms of relators
@@ -3541,109 +3531,101 @@ def heuristic_fn_v31(presentation: jnp.ndarray) -> float:
         Scalar heuristic value in [0,1] estimating likelihood of trivialisation in the
         future (higher is better).
     """
-    # Split presentation into two relators
-    r1 = presentation[:36]
-    r2 = presentation[36:]
+    N_GENERATORS = 2
+    MAX_RELATOR_LENGTH = 36
+    MAX_PRESENTATION_LENGTH = N_GENERATORS * MAX_RELATOR_LENGTH
     
-    # Compute effective lengths (non-zero elements)
-    is_nonzero_r1 = jnp.abs(r1) > 0
-    is_nonzero_r2 = jnp.abs(r2) > 0
-    len_r1 = jnp.sum(is_nonzero_r1)
-    len_r2 = jnp.sum(is_nonzero_r2)
-    total_len = len_r1 + len_r2
+    # Split into two relators
+    r1 = presentation[:MAX_RELATOR_LENGTH]
+    r2 = presentation[MAX_RELATOR_LENGTH:]
     
-    # Handle trivial presentation case
-    is_trivial = (len_r1 == 1) & (len_r2 == 1) & (r1[0] == 1) & (r2[0] == 2)
-    trivial_score = 1.0 if is_trivial else 0.0
+    # Count non-zero (actual) elements in each relator
+    r1_len = jnp.sum(r1 != 0)
+    r2_len = jnp.sum(r2 != 0)
+    total_len = r1_len + r2_len
     
-    # If presentation is empty or very short, return low score (only trivial case gets high score)
-    safe_total_len = jnp.where(total_len == 0, 1.0, total_len)
+    # Normalized length component (shorter is better, scaled to [0,1])
+    length_score = jnp.maximum(0.0, 1.0 - total_len / MAX_PRESENTATION_LENGTH)
     
-    # Feature 1: Count reducible adjacent pairs (a, a^{-1}) within each relator
-    def count_reducible_pairs(relator):
-        shifted_left = jnp.concatenate([relator[1:], jnp.array([0])])
-        shifted_right = jnp.concatenate([jnp.array([0]), relator[:-1]])
-        # Check for a, -a pattern (adjacent inverse)
-        pair_prod = relator * shifted_left
-        reducible_count = jnp.sum(pair_prod == -1 * (relator != 0) * (shifted_left != 0))
-        # Also check for shifted_right pattern (same as above but for previous element)
-        pair_prod_rev = relator * shifted_right
-        reducible_count_rev = jnp.sum(pair_prod_rev == -1 * (relator != 0) * (shifted_right != 0))
-        return (reducible_count + reducible_count_rev) / 2
+    # Cancellation potential: count adjacent inverse pairs
+    def count_cancellations(relator):
+        # Create shifted versions: relator[i] and relator[i+1]
+        shifted = jnp.concatenate([relator[1:], jnp.array([0])])
+        # Check if adjacent elements are inverses (sum to 0) and non-zero
+        inverses = (relator + shifted == 0) & (relator != 0)
+        return jnp.sum(inverses)
     
-    reducible_r1 = count_reducible_pairs(r1)
-    reducible_r2 = count_reducible_pairs(r2)
-    total_reducible_pairs = reducible_r1 + reducible_r2
+    cancel_count = count_cancellations(r1) + count_cancellations(r2)
+    # Normalize by max possible (length-1 per relator) and scale
+    max_cancellations = (MAX_RELATOR_LENGTH - 1) * 2
+    cancel_score = jnp.minimum(1.0, cancel_count / jnp.maximum(1, max_cancellations))
     
-    # Feature 2: Count repeated substrings of length 2
-    def count_repeated_substrings(relator):
-        # Only check non-padding elements
-        non_zero_mask = (relator != 0)
-        non_zero_indices = jnp.where(non_zero_mask, jnp.arange(36), 36)  # 36 is out of range for valid pairs
-        valid_count = jnp.sum(non_zero_mask)
-        if valid_count < 2:
-            return 0.0
+    # Palindrome symmetry: count matching symmetric pairs
+    def palindrome_score(relator, length):
+        # Only consider up to actual length
+        effective_len = jnp.minimum(length, MAX_RELATOR_LENGTH)
+        half_len = jnp.maximum(1, effective_len // 2)
         
-        # Extract substrings of length 2
-        substrings = jnp.stack([relator[:-1], relator[1:]], axis=1)
-        # Filter out those containing zeros
-        valid_substrings = jnp.where(
-            (substrings[:, 0] != 0) & (substrings[:, 1] != 0),
-            substrings,
-            jnp.array([0, 0])
-        )
+        # Get forward and backward halves
+        forward = relator[:half_len]
+        backward = jnp.flip(relator[MAX_RELATOR_LENGTH - half_len:])
         
-        # Count unique substrings and find duplicates
-        # We'll use a simplified hash (concatenate as string)
-        flat_vals = valid_substrings[:, 0] * 100 + valid_substrings[:, 1]
-        unique_vals, counts = jnp.unique(flat_vals, return_counts=True)
-        # Sum of (count - 1) for each substring
-        return jnp.sum(jnp.maximum(0, counts - 1))
+        # Check matches (accounting for padding)
+        valid_mask = (forward != 0) | (backward != 0)
+        matches = jnp.sum((forward == backward) & valid_mask)
+        return matches / jnp.maximum(1, jnp.sum(valid_mask))
     
-    repeated_r1 = count_repeated_substrings(r1)
-    repeated_r2 = count_repeated_substrings(r2)
+    pal1 = palindrome_score(r1, r1_len)
+    pal2 = palindrome_score(r2, r2_len)
+    pal_score = (pal1 + pal2) / 2
     
-    # Feature 3: Palindromic symmetry (simplified: count positions where r[i] == -r[len-1-i])
-    def palindromic_score(relator):
-        reversed_rel = jnp.flip(relator)
-        symmetric_pairs = (relator == -reversed_rel) & (relator != 0)
-        # Count symmetric pairs
-        return jnp.sum(symmetric_pairs)
+    # Repeated pattern detection: check for substrings that appear multiple times
+    def count_repeats(relator, length):
+        # Convert to tuple for processing (JAX-friendly approach via scan)
+        relator_int = relator.astype(jnp.int32)
+        max_pattern_len = jnp.minimum(4, jnp.maximum(1, length // 2))
+        
+        def scan_patterns(i, carry):
+            pattern_len, count = carry
+            # Extract pattern at position i
+            pattern = relator_int[i:i+pattern_len]
+            # Count occurrences of this pattern
+            matches = 0
+            for start in range(MAX_RELATOR_LENGTH - pattern_len + 1):
+                match_pattern = relator_int[start:start+pattern_len]
+                matches += jnp.all(pattern == match_pattern)
+            return carry, matches
+        
+        # Simplified repeat count: check for any substring of length 2+ repeated
+        repeated_count = 0
+        for pl in range(2, jnp.minimum(5, jnp.maximum(1, length))):
+            pattern = relator_int[:pl]
+            total_matches = 0
+            for start in range(MAX_RELATOR_LENGTH - pl + 1):
+                check_pattern = relator_int[start:start+pl]
+                total_matches += jnp.sum((check_pattern == pattern).astype(jnp.int32)) // pl
+            
+            # Count if pattern appears more than once
+            repeated_count += (total_matches > pl).astype(jnp.int32)
+        
+        return repeated_count
     
-    palin_r1 = palindromic_score(r1)
-    palin_r2 = palindromic_score(r2)
+    repeat1 = count_repeats(r1, r1_len)
+    repeat2 = count_repeats(r2, r2_len)
+    repeat_score = jnp.minimum(1.0, (repeat1 + repeat2) / 4.0)
     
-    # Feature 4: Balanced presentation (equal numbers of each generator and inverse)
-    def generator_balance(relator):
-        # Count occurrences of each generator and its inverse
-        gen1_count = jnp.sum(relator == 1) - jnp.sum(relator == -1)
-        gen2_count = jnp.sum(relator == 2) - jnp.sum(relator == -2)
-        # Ideal is zero net count per generator
-        return -jnp.abs(gen1_count) - jnp.abs(gen2_count)
+    # Combined score: weighted combination of components
+    w_length = 0.25
+    w_cancel = 0.35
+    w_pal = 0.25
+    w_repeat = 0.15
     
-    bal_r1 = generator_balance(r1)
-    bal_r2 = generator_balance(r2)
-    total_balance = bal_r1 + bal_r2
+    score = (w_length * length_score + 
+             w_cancel * cancel_score + 
+             w_pal * pal_score + 
+             w_repeat * repeat_score)
     
-    # Normalize features to [0,1] and combine with weights
-    # Normalization uses safe total length to avoid division by zero
-    reducible_norm = jnp.clip(total_reducible_pairs / (safe_total_len + 1.0), 0.0, 1.0)
-    repeated_norm = jnp.clip((repeated_r1 + repeated_r2) / (safe_total_len + 1.0), 0.0, 1.0)
-    palin_norm = jnp.clip((palin_r1 + palin_r2) / (safe_total_len + 1.0), 0.0, 1.0)
-    
-    # Balance score normalized by length and scaled
-    balance_norm = jnp.clip((total_balance + 4.0) / 4.0, 0.0, 1.0)  # maps [-4,0] to [0,1]
-    
-    # Combine features with weights (heuristic: favor reducible pairs the most)
-    combined_score = (
-        0.5 * reducible_norm +
-        0.2 * repeated_norm +
-        0.1 * palin_norm +
-        0.2 * balance_norm
-    )
-    
-    # Incorporate trivial case
-    score = jnp.where(is_trivial, 1.0, combined_score)
-    
-    return score
+    # Ensure bounded output [0,1]
+    return jnp.clip(score, 0.0, 1.0)
+# [EVOLVE-BLOCK-END]
 ```

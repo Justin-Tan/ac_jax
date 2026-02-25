@@ -1,4 +1,4 @@
-TEMPLATE = """
+```python
 import jax
 import jax.numpy as jnp
 
@@ -19,9 +19,10 @@ def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
     # [EVOLVE-BLOCK-START]
 
     # Example baseline logic: negative total length
-    # is_generator = jnp.abs(presentation) > 0
-    # total_length = jnp.sum(is_generator)
-    # return -1. * total_length
+    is_generator = jnp.abs(presentation) > 0
+    total_length = jnp.sum(is_generator)
+    return -1. * total_length
 
     # [EVOLVE-BLOCK-END]
-"""
+```
+

@@ -37,7 +37,7 @@ async def get_heuristic(i):
             max_output_tokens=MAX_TOKENS,
             temperature=TEMPERATURE,
             top_p=TOP_P,
-            extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
+            extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY} # , "stop": "```"}
         )
         latency = time.time() - start
         return _CONTEXT_i, latency,  result.output_text
