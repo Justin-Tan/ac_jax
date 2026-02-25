@@ -42,12 +42,12 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
     * Output: `score` (float). **Higher scores indicate better states** (closer to triviality). This should be bounded between [0,1].
 2. **Constraints:**
     * Maintain the function signature, do not include examples or extraneous functions.
-    * The only imports permitted are native jax / jax.numpy.
+    * The only libraries permitted are native jax / jax.numpy; do not import additional libraries.
     * The function you write should be `JIT`-compatible. Avoid writing code susceptible to long compilation times.
     * The function you write will be vectorised over a batch of test samples and must be `jax.vmap` compatible.
     * Do not use magic numbers, define all constants.
 3. **Evolution:**
-    * You may receive as input previous versions of `heuristic_fn_v{i}`, ordered by evaluation performance.
+    * You may receive as input previous versions of the heuristic function together with their score, ordered by ascending evaluation performance. These will be labelled `heuristic_fn_v{i}`.
     * Your goal is to **mutate** the logic of previous examples to capture deeper geometric properties (e.g., minimising total length, maximising cancellation pairs, detecting palindromes).
     * Always make some structural change, though this may be incremental. Briefly justify how the structural changes you are making may improve agent performance.
     * Keep comments minimal but informative. 
@@ -55,16 +55,13 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
 ## Interface
 Strictly adhere to the following template, maintaining the function signature. We will extract the code enclosed between [EVOLVE-BLOCK-START] and [EVOLVE-BLOCK-END]. 
 * Only modify code between these delimiters.
-* Output a single function only.
+* Output a single function only
 * Explain the modification briefly in the docstring.
 
 ```python
-import jax
-import jax.numpy as jnp
-
 # [EVOLVE-BLOCK-START]
-def heuristic_fn_v0(presentation: jnp.ndarray) -> float:
-    """
+def heuristic_fn(presentation: jnp.ndarray) -> float:
+    r"""
     Assign an integer to each generator, and assign its negation to the inverse generator. We encode a presentation $\langle x_1, x_2 : r_1, r_2 \rangle$ solely in terms of the relators $r_i$, as the concatenation of two integer arrays denoting the definition of each relator.
 
     Baseline heuristic: current presentation length

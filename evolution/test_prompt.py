@@ -31,18 +31,5 @@ response = client.responses.create(
     extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
 )
 
-# response = client.chat.completions.create(
-#     model=MODEL_NAME,
-#     messages=[
-#         {"role": "system", "content": },
-#         {"role": "user", "content": _TEST_PROMPT}
-#     ],
-#     max_tokens=MAX_TOKENS,
-#     temperature=TEMPERATURE,
-#     top_p=TOP_P,
-#     extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
-# )
-
 print("Model output:")
 print(response.output_text)
-# print(response.choices[0].message.content)

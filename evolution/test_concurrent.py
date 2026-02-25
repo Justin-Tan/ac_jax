@@ -23,12 +23,10 @@ with open("context/instructions_AC.md", "r", encoding="utf-8") as f:
 
 client = AsyncOpenAI(base_url=BASE_URL, api_key="EMPTY")
 
-def heuristic_fn_v0(observation: jnp.ndarray) -> float:
-    return -(jnp.shape(observation)[-1] - 2.)
-
 async def get_heuristic(i):
     start = time.time()
-    _CONTEXT_i = f"Modify the function `heuristic_fn_v0` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v{i}`."
+    _CONTEXT_i = f"Modify the function `heuristic_fn` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v{i}`."
+
     try:
         result = await client.responses.create(
             model=MODEL_NAME,
@@ -40,7 +38,7 @@ async def get_heuristic(i):
             extra_body = {"top_k": TOP_K, "min_p": MIN_P, "repetition_penalty": REP_PENALTY,}
         )
         latency = time.time() - start
-        return _CONTEXT_i, latency,  result.output_text
+        return _CONTEXT_i, latency, result.output_text
     except Exception as e:
         print(f"Request {i} failed: {e}")
         return None

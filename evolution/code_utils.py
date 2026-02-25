@@ -1,14 +1,10 @@
-import jax
-import jax.numpy as jnp
 import ast
-
-import dataclasses
 import io, re
 import tokenize
 from typing import Sequence, Any
 from collections.abc import Iterator, MutableSet, Sequence
 
-from ac_jax import logging
+from absl import logging
 from evolution import code_types
 
 

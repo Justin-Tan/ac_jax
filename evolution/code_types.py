@@ -1,10 +1,6 @@
-import jaxtyping
-import jax.numpy as jnp
-
 import ast
 
 from chex import dataclass, PRNGKey
-from jaxtyping import Array, Float, Int
 from typing import Any, Dict, NamedTuple, Optional, Union, List
 
 class Heuristics(NamedTuple):
@@ -96,6 +92,12 @@ class Program:
         index = self.find_function_index(function_name)
         return self.functions[index]
     
+class Task(NamedTuple):
+    """Input to evaluation pipeline."""
+    candidate_id: int
+    program: Program
+    function_to_run: str
+    seed: int  # seed for random key
 
 class ProgramVisitor(ast.NodeVisitor):
     """Parses code to collect all required information to produce a `Program`.
