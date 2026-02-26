@@ -247,7 +247,7 @@ class Evaluator:
             try:
                 evolved_function, program = code_parser._sample_to_program(sample,
                     None, self._template, self._function_to_evolve)
-                seed = int(time.time() % (2**32 - i))
+                seed = int(time.time() % (2**32 + i))
                 task = code_types.Task(candidate_id=i,
                                        program=program,
                                        function_to_run=self._function_to_run,
