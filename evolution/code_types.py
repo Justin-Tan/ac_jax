@@ -145,5 +145,5 @@ class ProgramVisitor(ast.NodeVisitor):
         return Program(preface=self._preface, functions=self._functions)
 
 
-# Sentinel for heuristics pub/sub queue shutdown (evolution pub/sub).
+# Sentinel for heuristics pub/sub queue shutdown
 HEURISTICS_QUEUE_SHUTDOWN = object()

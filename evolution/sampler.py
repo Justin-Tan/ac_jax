@@ -4,8 +4,6 @@ from openai import AsyncOpenAI
 
 from typing import Sequence, Tuple
 
-from code_parser import Evaluator
-
 # Configuration
 BATCH_SIZE = 32
 BASE_URL = "http://localhost:8003/v1/"
@@ -61,40 +59,38 @@ class LLM:
 
 
 class Sampler:
-    """Interfaces with database. Enqueues procedurally generated prompts in queue, receives
-    asynchronous generations from LLMs, registers them in database."""
-    def __init__(self, database, template, samples_per_prompt=BATCH_SIZE,
-                 max_generations=256, heuristics_queue=None, shutdown_sentinel=None):
+    """Produces LLM samples and publishes them to the heuristics queue.
+
+    Interfaces with the database for prompt generation. Multiple Sampler
+    instances can publish to the same queue concurrently to keep the
+    evaluation pipeline saturated.
+    """
+    def __init__(self, database, heuristics_queue: asyncio.Queue,
+                 stop_event: asyncio.Event,
+                 samples_per_prompt: int = BATCH_SIZE,
+                 sampler_id: int = 0):
         self.database = database
-        self.max_generations = max_generations
         self.llm = LLM(samples_per_prompt=samples_per_prompt)
         self._heuristics_queue = heuristics_queue
-        self._shutdown_sentinel = shutdown_sentinel
-        if heuristics_queue is None:
-            self.evaluator = Evaluator(database, template, function_to_evolve="heuristic_fn",
-                                       function_to_run="heuristic_fn")
+        self._stop_event = stop_event
+        self._sampler_id = sampler_id
+        self.generations_completed: int = 0
 
     async def sample(self):
-        """Coordinates sampling/evaluation/database interaction."""
-        _generation = 0
-        pending_eval = None
-        while _generation < self.max_generations:
+        """Generate samples and publish to queue indefinitely.
 
-            prompts = self.database.generate_prompts()
+        Shutdown signalling is responsibility of orchestrator. Checks for 
+        stop signal between LLM generations.
+        """
+        loop = asyncio.get_running_loop()
+        while not self._stop_event.is_set():
+            # Offload to thread pool so the event loop isn't blocked while
+            # the database builds prompts (CPU-bound as DB grows).
+            prompts = await loop.run_in_executor(None, self.database.generate_prompts)
             samples, latencies = await self.llm.generate_samples(prompts)
 
-            if self._heuristics_queue is not None:
-                # Pub/sub: publish one sample per queue item for evaluator workers.
-                for i, sample in enumerate(samples):
-                    if sample is not None:
-                        await self._heuristics_queue.put((_generation, i, sample))
-            else:
-                # Original: wait for previous eval, then run this batch.
-                if pending_eval is not None:
-                    await pending_eval
-                pending_eval = asyncio.create_task(self.evaluator.analyse(samples))
-
-            _generation += 1
-
-        if self._heuristics_queue is not None and self._shutdown_sentinel is not None:
-            await self._heuristics_queue.put(self._shutdown_sentinel)
+            for i, sample in enumerate(samples):
+                if sample is not None:
+                    await self._heuristics_queue.put(
+                        (self.generations_completed, i, sample))
+            self.generations_completed += 1
