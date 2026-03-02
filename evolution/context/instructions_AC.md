@@ -39,13 +39,13 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
 
 1.  **Input/Output:**
     * Input: `presentation` (jnp.ndarray, dtype=int32, shape=(72,)).
-    * Output: `score` (float). **Higher scores indicate better states** (closer to triviality). This should be bounded between [0,1].
+    * Output: `score` (float). **Higher scores indicate better states** (closer to triviality). This should be bounded between [0,1]. Reminder that `jnp.clip` is a questionable way to enforce this constraint.
 2. **Constraints:**
     * Maintain the function signature, do not include examples or extraneous functions.
     * The only libraries permitted are native jax / jax.numpy; do not import additional libraries.
     * The function you write should be `JIT`-compatible. Avoid writing code susceptible to long compilation times.
     * The function you write will be vectorised over a batch of test samples and must be `jax.vmap` compatible.
-    * Do not use magic numbers, define all constants.
+    * Do not use magic numbers, justify and catalog all numerical constants appearing in the function.
 3. **Evolution:**
     * You may receive as input previous versions of the heuristic function together with their score, ordered by ascending evaluation performance. These will be labelled `heuristic_fn_v{i}`.
     * Your goal is to **mutate** the logic of previous examples to capture deeper geometric properties (e.g., minimising total length, maximising cancellation pairs, detecting palindromes).
