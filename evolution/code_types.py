@@ -1,4 +1,4 @@
-import ast
+import ast, textwrap
 
 from chex import dataclass, PRNGKey
 from typing import Any, Dict, NamedTuple, Optional, Union, List
@@ -34,29 +34,39 @@ class Function:
     body: str
     return_type: str | None = None
     docstring: str | None = None
+    indent: str = '    '  # default indent is 4 spaces
 
     def __str__(self) -> str:
         return_type = f' -> {self.return_type}' if self.return_type else ''
 
         function = f'def {self.name}({self.args}){return_type}:\n'
         if self.docstring:
-            # self.docstring is already indented on every line except the first one.
-            # Here, we assume the indentation is always two spaces.
             new_line = '\n' if self.body else ''
-            function += f'  """{self.docstring}"""{new_line}'
-        # self.body is already indented.
-        function += self.body + '\n\n'
+            # Wrap stored content in r"""...""" so backslashes (e.g. LaTeX) are
+            # preserved faithfully when the function is serialised as source.
+            indented_doc = textwrap.indent(self.docstring, self.indent)
+            function += f'{self.indent}r"""\n{indented_doc}\n{self.indent}"""{new_line}'
+        # don't assume indentation
+        function += textwrap.indent(self.body, self.indent) + '\n\n'
         return function
 
     def __setattr__(self, name: str, value: str) -> None:
         # Ensure there aren't leading & trailing new lines in `body`.
         if name == 'body':
             value = value.strip('\n')
-        # Ensure there aren't leading & trailing quotes in `docstring``.
+        # Normalise docstring: strip any outer triple-quote wrapper so we store
+        # only the raw content.  __str__ will re-wrap with r"""...""".
         if name == 'docstring' and value is not None:
-            if '"""' in value:
-                value = value.strip()
-                value = value.replace('"""', '')
+            value = value.strip()
+            for prefix in ('r"""', '"""', "r'''", "'''"):
+                if value.startswith(prefix):
+                    value = value[len(prefix):]
+                    break
+            for suffix in ('"""', "'''"):
+                if value.endswith(suffix):
+                    value = value[:-3]
+                    break
+            value = value.strip('\n')
         object.__setattr__(self, name, value)
 
 @dataclass
@@ -113,7 +123,7 @@ class ProgramVisitor(ast.NodeVisitor):
         self._current_function: str | None = None
 
     def visit_FunctionDef(self,  # pylint: disable=invalid-name
-                            node: ast.FunctionDef) -> None:
+                          node: ast.FunctionDef) -> None:
         """Collects all information about the function being parsed."""
         if node.col_offset == 0:  # We only care about first level functions.
             self._current_function = node.name
@@ -125,18 +135,35 @@ class ProgramVisitor(ast.NodeVisitor):
             docstring = None
             if isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value,
                                                                 ast.Str):
-                docstring = f'  """{ast.literal_eval(ast.unparse(node.body[0]))}"""'
+                # Use raw source lines to preserve backslashes
+                doc_start = node.body[0].lineno - 1
+                doc_end = node.body[0].end_lineno
+                raw_doc = '\n'.join(self._codelines[doc_start:doc_end])
+                # Strip the outer triple-quote wrapper (r"""...""", """""", etc)
+                raw_doc = raw_doc.strip()
+                for prefix in ('r"""', '"""', "r'''", "'''"):
+                    if raw_doc.startswith(prefix):
+                        raw_doc = raw_doc[len(prefix):]
+                        break
+                for suffix in ('"""', "'''"):
+                    if raw_doc.endswith(suffix):
+                        raw_doc = raw_doc[:-3]
+                        break
+                docstring = textwrap.dedent(raw_doc).strip('\n')
                 if len(node.body) > 1:
                     body_start_line = node.body[1].lineno - 1
                 else:
                     body_start_line = function_end_line
+
+            body = '\n'.join(self._codelines[body_start_line:function_end_line])
+            body = textwrap.dedent(body)
 
             self._functions.append(Function(
                 name=node.name,
                 args=ast.unparse(node.args),
                 return_type=ast.unparse(node.returns) if node.returns else None,
                 docstring=docstring,
-                body='\n'.join(self._codelines[body_start_line:function_end_line]),
+                body=body,
             ))
         self.generic_visit(node)
 

@@ -4,6 +4,7 @@ import tokenize
 from typing import Sequence, Any
 from collections.abc import Iterator, MutableSet, Sequence
 
+import textwrap
 from absl import logging
 from evolution import code_types
 
@@ -102,3 +103,33 @@ def _calls_ancestor(program: str, function_to_evolve: str) -> bool:
             return True
     return False
 
+
+def extract_docstring(source: str) -> str:
+    tree = ast.parse(source)
+    func = tree.body[0]
+    docstring = ast.get_docstring(func)
+    # re-wrap in triple quotes
+    return f'"""\n{docstring}\n"""'
+
+def extract_body(source: str) -> str:
+    try:
+        tree = ast.parse(source)
+        func = tree.body[0]
+        
+        # Skip the docstring node if present
+        body_nodes = func.body
+        if (isinstance(body_nodes[0], ast.Expr) and 
+            isinstance(body_nodes[0].value, ast.Constant)):
+            body_nodes = body_nodes[1:]
+        
+        # Use line numbers to slice the original source
+        source_lines = source.splitlines()
+        start = body_nodes[0].lineno - 1
+        end = body_nodes[-1].end_lineno
+        
+        body = "\n".join(source_lines[start:end])
+        return textwrap.dedent(body)
+    
+    except SyntaxError:
+        # Input is already just the body, possibly indented
+        return textwrap.dedent(source)

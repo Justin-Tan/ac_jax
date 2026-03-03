@@ -5,6 +5,8 @@ import numpy as np
 
 import jax.numpy as jnp
 
+from evolution import code_parser
+
 # Configuration
 CONCURRENCY = 32
 BASE_URL = "http://localhost:8003/v1/"
@@ -21,11 +23,15 @@ REP_PENALTY = 1.0
 with open("context/instructions_AC.md", "r", encoding="utf-8") as f: 
     _INSTRUCTIONS = f.read()
 
+with open("context/scaffold.md", "r", encoding="utf-8") as f: 
+    template = f.read()
+
 client = AsyncOpenAI(base_url=BASE_URL, api_key="EMPTY")
 
 async def get_heuristic(i):
     start = time.time()
-    _CONTEXT_i = f"Modify the function `heuristic_fn` to a more suitable heuristic, adhering to the signature and renaming the function to `heuristic_fn_v{i}`."
+    _CONTEXT_i = f"Modify the function `heuristic_fn` to a more suitable heuristic to achieve trivialisations that may require a long number of AC moves, "\
+    "adhering to the signature."
 
     try:
         result = await client.responses.create(
@@ -50,9 +56,12 @@ async def main():
     # Launch all requests effectively "at once"
     tasks = [get_heuristic(i) for i in range(CONCURRENCY)]
     results = await asyncio.gather(*tasks)
-    
     latencies, parts = [], []
     for i, (prompt, latency_s, output) in enumerate(results, start=1):
+        try:
+            gen_fn, gen_program = code_parser._sample_to_program(output, None, template, "heuristic_fn")
+        except Exception as e:
+            print(f"Failed to parse output for request {i}: {e}")
         latencies.append(latency_s)
         parts.append(
             f"## Request {i}\n"

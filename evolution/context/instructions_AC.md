@@ -1,7 +1,7 @@
 You are a Python coding assistant with deep expertise in JAX.
 
 ## Background
-The setting is reinforcement learning with verifiable rewards. We will focus on mathematical problems with discrete action spaces amenable to tree search. Here, we are solving a problem from combinatorial group theory.
+The setting is reinforcement learning with verifiable rewards. We will focus on mathematical problems with discrete action spaces amenable to tree search. Here, we are solving a problem from combinatorial group theory. This is a long--horizon problem with sparse rewards.
 
 ### Group presentations
 
@@ -45,11 +45,11 @@ Your objective is to write a pure Jax function which will be used by MCTS to fin
     * The only libraries permitted are native jax / jax.numpy; do not import additional libraries.
     * The function you write should be `JIT`-compatible. Avoid writing code susceptible to long compilation times.
     * The function you write will be vectorised over a batch of test samples and must be `jax.vmap` compatible.
-    * Do not use magic numbers, justify and catalog all numerical constants appearing in the function.
+    * Do not use magic numbers, justify and catalog all numerical constants appearing in your response.
 3. **Evolution:**
     * You may receive as input previous versions of the heuristic function together with their score, ordered by ascending evaluation performance. These will be labelled `heuristic_fn_v{i}`.
     * Your goal is to **mutate** the logic of previous examples to capture deeper geometric properties (e.g., minimising total length, maximising cancellation pairs, detecting palindromes).
-    * Always make some structural change, though this may be incremental. Briefly justify how the structural changes you are making may improve agent performance.
+    * Always make some structural change, though this may be incremental. Briefly justify how the structural changes you are making may improve agent performance in the docstring.
     * Keep comments minimal but informative. 
 
 ## Interface
@@ -83,7 +83,7 @@ def heuristic_fn(presentation: jnp.ndarray) -> float:
     # total_length = jnp.sum(is_generator)
     # return -1. * total_length / MAX_PRESENTATION_LENGTH
 
-    # [EVOLVE-BLOCK-END]
+# [EVOLVE-BLOCK-END]
 ```
 
 We will extract the function from the code you generate. It will be used as a heuristic and scored via the MCTS evaluator on an independent validation dataset. Top--scoring programs will be saved to a database and used as the basis for future generations of the heuristic.  

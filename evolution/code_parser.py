@@ -71,19 +71,22 @@ def _sample_to_program(generated_code: str, version_generated: int | None, templ
     """Returns parsed function and python executable as string"""
 
     # preflight validation
-    body = _trim_function_body(generated_code)
-    if not _validate_sample(body):
+    sample = _trim_function_body(generated_code)
+    if not _validate_sample(sample):
         raise ValueError(f'Warning: code generated could not be parsed/contains unsafe commands.!\n{generated_code}')
 
     if version_generated is not None:  # rename recursive calls
-        body = code_utils.rename_function_calls(body,
+        body = code_utils.rename_function_calls(sample,
             f'{function_to_evolve}_v{version_generated}',
             function_to_evolve)
 
     # overwrite template body with body from LLM output
     program = copy.deepcopy(template)
     evolved_function = program.get_function(function_to_evolve)
-    evolved_function.body = body
+    evolved_docstring = code_utils.extract_docstring(sample)
+    evolved_body = code_utils.extract_body(sample)
+    evolved_function.body = evolved_body
+    evolved_function.docstring = evolved_docstring
     return evolved_function, program  # str(program)
 
 
