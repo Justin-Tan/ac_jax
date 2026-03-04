@@ -6,9 +6,6 @@ import concurrent.futures
 import asyncio
 import traceback
 
-if "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ:
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-
 import ast, re, copy
 import textwrap
 

@@ -2,7 +2,6 @@
 import jax
 import jax.numpy as jnp
 
-# [EVOLVE-BLOCK-START]
 def heuristic_fn(presentation: jnp.ndarray) -> float:
     r"""
     Assign an integer to each generator, and assign its negation to the inverse generator. We encode a presentation $\langle x_1, x_2 : r_1, r_2 \rangle$ solely in terms of the relators $r_i$, as the concatenation of two integer arrays denoting the definition of each relator.
@@ -22,5 +21,4 @@ def heuristic_fn(presentation: jnp.ndarray) -> float:
     is_generator = jnp.abs(presentation) > 0
     total_length = jnp.sum(is_generator)
     return -1. * total_length
-    # [EVOLVE-BLOCK-END]
 ```

@@ -5,10 +5,10 @@ import numpy as np
 
 import jax.numpy as jnp
 
-from evolution import code_parser
+from evolution import code_parser, code_utils
 
 # Configuration
-CONCURRENCY = 32
+CONCURRENCY = 16
 BASE_URL = "http://localhost:8003/v1/"
 MODEL_NAME = "unsloth/Qwen3-Coder-Next"
 MAX_MODEL_LEN = 8192  # must agree with server config
@@ -20,11 +20,12 @@ TOP_K = 40
 MIN_P = 1e-2
 REP_PENALTY = 1.0
 
-with open("context/instructions_AC.md", "r", encoding="utf-8") as f: 
+with open("evolution/context/instructions_AC.md", "r", encoding="utf-8") as f: 
     _INSTRUCTIONS = f.read()
 
-with open("context/scaffold.md", "r", encoding="utf-8") as f: 
+with open("evolution/context/scaffold.md", "r", encoding="utf-8") as f: 
     template = f.read()
+template = code_utils.text_to_program(template)
 
 client = AsyncOpenAI(base_url=BASE_URL, api_key="EMPTY")
 
@@ -62,12 +63,14 @@ async def main():
             gen_fn, gen_program = code_parser._sample_to_program(output, None, template, "heuristic_fn")
         except Exception as e:
             print(f"Failed to parse output for request {i}: {e}")
+            print(gen_program)
         latencies.append(latency_s)
+
         parts.append(
             f"## Request {i}\n"
             f"**Prompt:** {prompt}\n\n"
             f"**Latency:** {latency_s:.3f} s\n\n"
-            f"**Output:**\n\n{output}\n"
+            f"**Output:**\n\n{gen_program}\n"
         )
 
     total_time = time.time() - start_total
